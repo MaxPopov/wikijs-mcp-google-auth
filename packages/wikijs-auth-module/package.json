@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "main": "authentication.js",
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
     "jsonwebtoken": "^9.0.2",

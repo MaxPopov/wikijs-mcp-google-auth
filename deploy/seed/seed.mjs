@@ -11,7 +11,22 @@
 // Idempotent: safe to re-run. DEV CREDENTIALS ONLY — never point this
 // script at a production Wiki.js.
 
+import { generateKeyPairSync } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 const WIKI_URL = process.env.WIKI_URL ?? 'http://127.0.0.1:3000'
+const KEYS_DIR = process.env.MCP_KEYS_DIR ??
+  path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'keys')
+
+export const DELEGATION = {
+  strategyKey: 'mcpdelegation',
+  audience: 'urn:wikijs:mcp-delegation',
+  issuer: 'urn:wikijs-mcp-google-auth',
+  providerPriority: 'google,oidc,local,mcpdelegation',
+  maxTokenAge: 120
+}
 const ADMIN_EMAIL = process.env.WIKI_ADMIN_EMAIL ?? 'admin@example.com'
 const ADMIN_PASS = process.env.WIKI_ADMIN_PASS ?? 'admin1234!'
 
@@ -246,6 +261,96 @@ async function ensurePages (adminJwt) {
   }
 }
 
+// Dev-only RSA keypair for MCP assertion signing. In production, generate
+// keys yourself and configure them explicitly (see README).
+export function ensureKeys () {
+  const privPath = path.join(KEYS_DIR, 'mcp-assertion-key.pem')
+  const pubPath = path.join(KEYS_DIR, 'mcp-assertion-key.pub.pem')
+  if (!fs.existsSync(privPath) || !fs.existsSync(pubPath)) {
+    fs.mkdirSync(KEYS_DIR, { recursive: true })
+    const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+    })
+    fs.writeFileSync(privPath, privateKey, { mode: 0o600 })
+    fs.writeFileSync(pubPath, publicKey)
+    console.log(`Generated dev RSA keypair in ${KEYS_DIR}`)
+  }
+  return {
+    privateKey: fs.readFileSync(privPath, 'utf8'),
+    publicKey: fs.readFileSync(pubPath, 'utf8'),
+    privPath,
+    pubPath
+  }
+}
+
+async function ensureDelegationStrategy (adminJwt, publicKey) {
+  const data = await gql(`
+    { authentication { activeStrategies(enabledOnly: false) {
+      key
+      strategy { key }
+      displayName
+      order
+      isEnabled
+      config { key value }
+      selfRegistration
+      domainWhitelist
+      autoEnrollGroups
+    } } }`, {}, adminJwt)
+
+  // updateStrategies REPLACES the full set (it deletes strategies missing
+  // from the input), so re-send every existing strategy along with ours.
+  // activeStrategies returns config values as {..., "value": x} while
+  // updateStrategies expects {"v": x} — convert accordingly.
+  const strategies = data.authentication.activeStrategies
+    .filter(s => s.key !== DELEGATION.strategyKey)
+    .map(s => ({
+      key: s.key,
+      strategyKey: s.strategy.key,
+      displayName: s.displayName,
+      order: s.order,
+      isEnabled: s.isEnabled,
+      config: (s.config ?? []).map(({ key, value }) => ({
+        key,
+        value: JSON.stringify({ v: JSON.parse(value).value })
+      })),
+      selfRegistration: s.selfRegistration,
+      domainWhitelist: s.domainWhitelist ?? [],
+      autoEnrollGroups: s.autoEnrollGroups ?? []
+    }))
+
+  strategies.push({
+    key: DELEGATION.strategyKey,
+    strategyKey: DELEGATION.strategyKey,
+    displayName: 'MCP Delegation',
+    order: strategies.length,
+    isEnabled: true,
+    config: [
+      { key: 'publicKey', value: JSON.stringify({ v: publicKey }) },
+      { key: 'audience', value: JSON.stringify({ v: DELEGATION.audience }) },
+      { key: 'issuer', value: JSON.stringify({ v: DELEGATION.issuer }) },
+      { key: 'providerPriority', value: JSON.stringify({ v: DELEGATION.providerPriority }) },
+      { key: 'maxTokenAge', value: JSON.stringify({ v: DELEGATION.maxTokenAge }) }
+    ],
+    selfRegistration: false,
+    domainWhitelist: [],
+    autoEnrollGroups: []
+  })
+
+  const res = await gql(`
+    mutation ($strategies: [AuthenticationStrategyInput]!) {
+      authentication { updateStrategies(strategies: $strategies) {
+        responseResult { succeeded message }
+      } }
+    }`, { strategies }, adminJwt)
+  const rr = res.authentication.updateStrategies.responseResult
+  if (!rr.succeeded) {
+    throw new Error(`updateStrategies failed: ${rr.message}`)
+  }
+  console.log('Delegation strategy "mcpdelegation" registered/updated')
+}
+
 export async function seed () {
   // Any HTTP response at all means the server is up. In setup mode without
   // built client assets GET / may legitimately return 500.
@@ -263,8 +368,10 @@ export async function seed () {
   const groupIds = await ensureGroups(adminJwt)
   await ensureUsers(adminJwt, groupIds)
   await ensurePages(adminJwt)
+  const keys = ensureKeys()
+  await ensureDelegationStrategy(adminJwt, keys.publicKey)
   console.log('Seed complete.')
-  return { adminJwt, groupIds }
+  return { adminJwt, groupIds, keys }
 }
 
 const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())
