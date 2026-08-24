@@ -95,10 +95,28 @@ export async function startHarness (): Promise<TestHarness> {
     if (r2.status !== 302) throw new Error(`fake google authorize: HTTP ${r2.status}`)
     const callbackUrl = r2.headers.get('location')!
 
-    // 3. Our callback -> redirect to the MCP client's redirect_uri
+    // 3. Our callback -> consent interstitial (HTML) or redirect
     const r3 = await fetch(callbackUrl, { redirect: 'manual' })
-    if (r3.status !== 302) throw new Error(`google callback: HTTP ${r3.status} ${await r3.text()}`)
-    const clientRedirect = new URL(r3.headers.get('location')!)
+    let clientRedirect: URL
+    if (r3.status === 200) {
+      // Consent page: simulate the user approving.
+      const html = await r3.text()
+      const consentId = /name="consent_id" value="([^"]+)"/.exec(html)?.[1]
+      const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1]
+      if (!consentId || !csrf) throw new Error('consent page missing fields')
+      const consentRes = await fetch(`${baseUrl}/oauth/consent`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ consent_id: consentId, csrf, approve: 'yes' })
+      })
+      if (consentRes.status !== 302) throw new Error(`consent: HTTP ${consentRes.status} ${await consentRes.text()}`)
+      clientRedirect = new URL(consentRes.headers.get('location')!)
+    } else if (r3.status === 302) {
+      clientRedirect = new URL(r3.headers.get('location')!)
+    } else {
+      throw new Error(`google callback: HTTP ${r3.status} ${await r3.text()}`)
+    }
     if (clientRedirect.searchParams.get('error')) {
       return Object.fromEntries(clientRedirect.searchParams.entries())
     }

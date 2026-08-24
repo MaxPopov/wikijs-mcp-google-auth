@@ -44,7 +44,11 @@ export function main (): void {
   const app = createApp({
     publicUrl: settings.publicUrl,
     provider,
-    mcpDeps: { broker, wikiClient }
+    mcpDeps: {
+      broker,
+      wikiClient,
+      audit: event => logger.info({ audit: event }, 'tool call')
+    }
   })
 
   const server = app.listen(settings.port, () => {

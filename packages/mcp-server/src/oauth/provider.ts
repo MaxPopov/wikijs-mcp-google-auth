@@ -15,6 +15,8 @@ import type { GoogleOIDC, GoogleIdentity } from './google.js'
 const NS = {
   clients: 'oauth.clients',
   pending: 'oauth.pending',
+  consentPending: 'oauth.consentPending',
+  approvals: 'oauth.approvals',
   codes: 'oauth.codes',
   access: 'oauth.accessTokens',
   refresh: 'oauth.refreshTokens',
@@ -28,6 +30,13 @@ interface PendingAuth {
   state?: string
   scopes?: string[]
   resource?: string
+  createdAt: number
+}
+
+interface ConsentPending {
+  sessionId: string
+  csrf: string
+  pending: PendingAuth
   createdAt: number
 }
 
@@ -64,8 +73,21 @@ export interface ProviderOptions {
   accessTokenTtlSeconds?: number
   refreshTokenTtlSeconds?: number
   pendingAuthTtlSeconds?: number
+  /**
+   * Require an authenticated per-client consent step before releasing an
+   * authorization code (defends against the OAuth confused-deputy attack
+   * that open DCR + a static upstream client would otherwise enable).
+   * Defaults to true; only disable for trusted first-party-only setups.
+   */
+  requireConsent?: boolean
   onLogin?: (identity: GoogleIdentity) => void
   onRevokeSession?: (session: SessionRecord) => void
+}
+
+function escapeHtml (value: string): string {
+  return value.replace(/[&<>"']/g, ch => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]!
+  ))
 }
 
 function opaqueToken (prefix: string): string {
@@ -90,6 +112,7 @@ export class GoogleBackedOAuthProvider implements OAuthServerProvider {
   private readonly accessTtl: number
   private readonly refreshTtl: number
   private readonly pendingTtl: number
+  private readonly requireConsent: boolean
 
   constructor (
     private readonly store: KVStore,
@@ -99,10 +122,15 @@ export class GoogleBackedOAuthProvider implements OAuthServerProvider {
     this.accessTtl = opts.accessTokenTtlSeconds ?? 3600
     this.refreshTtl = opts.refreshTokenTtlSeconds ?? 30 * 24 * 3600
     this.pendingTtl = opts.pendingAuthTtlSeconds ?? 10 * 60
+    this.requireConsent = opts.requireConsent ?? true
   }
 
   private get googleCallbackUrl (): string {
     return `${this.opts.publicUrl}/oauth/google/callback`
+  }
+
+  private get consentUrl (): string {
+    return `${this.opts.publicUrl}/oauth/consent`
   }
 
   get clientsStore (): OAuthRegisteredClientsStore {
@@ -196,11 +224,75 @@ export class GoogleBackedOAuthProvider implements OAuthServerProvider {
     this.store.set(NS.sessions, sessionKey, session)
     this.opts.onLogin?.(identity)
 
+    // Confused-deputy defense: before releasing a code to a (possibly
+    // attacker-registered) redirect URI, require the AUTHENTICATED user to
+    // approve this specific client + redirect URI. Approval is remembered
+    // per user+client+redirect, so it is a one-time prompt per client and
+    // never carries across users.
+    const approvalKey = `${sessionKey}|${pending.clientId}|${pending.redirectUri}`
+    if (this.requireConsent && !this.store.get<boolean>(NS.approvals, approvalKey)) {
+      const consentId = randomUUID()
+      const csrf = opaqueToken('csrf')
+      this.store.set<ConsentPending>(NS.consentPending, consentId, {
+        sessionId: sessionKey,
+        csrf,
+        pending,
+        createdAt: nowSec()
+      })
+      this.pruneConsent()
+      res.status(200).type('html').send(this.renderConsentPage(consentId, csrf, pending))
+      return
+    }
+
+    this.issueCodeAndRedirect(pending, sessionKey, res)
+  }
+
+  /** POST handler for the consent interstitial. */
+  handleConsent = (req: Request, res: Response): void => {
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const consentId = String(body.consent_id ?? '')
+    const csrf = String(body.csrf ?? '')
+    const approve = String(body.approve ?? '')
+
+    const record = consentId ? this.store.get<ConsentPending>(NS.consentPending, consentId) : undefined
+    if (!record) {
+      res.status(400).send('Consent request is unknown or expired. Please retry connecting.')
+      return
+    }
+    // Constant-time-ish CSRF check; the id itself is an unguessable secret
+    // known only to the authenticated user's browser.
+    if (csrf !== record.csrf || nowSec() - record.createdAt > this.pendingTtl) {
+      this.store.delete(NS.consentPending, consentId)
+      res.status(400).send('Consent request is invalid or expired. Please retry connecting.')
+      return
+    }
+    this.store.delete(NS.consentPending, consentId)
+
+    if (!this.store.get<SessionRecord>(NS.sessions, record.sessionId)) {
+      res.status(400).send('Your session no longer exists. Please retry connecting.')
+      return
+    }
+
+    const { pending } = record
+    if (approve !== 'yes') {
+      const url = new URL(pending.redirectUri)
+      url.searchParams.set('error', 'access_denied')
+      url.searchParams.set('error_description', 'User denied the authorization request')
+      if (pending.state) url.searchParams.set('state', pending.state)
+      res.redirect(url.toString())
+      return
+    }
+
+    this.store.set<boolean>(NS.approvals, `${record.sessionId}|${pending.clientId}|${pending.redirectUri}`, true)
+    this.issueCodeAndRedirect(pending, record.sessionId, res)
+  }
+
+  private issueCodeAndRedirect (pending: PendingAuth, sessionId: string, res: Response): void {
     const code = opaqueToken('mcp_code')
     const record: CodeRecord = {
       clientId: pending.clientId,
       codeChallenge: pending.codeChallenge,
-      sessionId: sessionKey,
+      sessionId,
       redirectUri: pending.redirectUri,
       scopes: pending.scopes,
       resource: pending.resource,
@@ -212,6 +304,35 @@ export class GoogleBackedOAuthProvider implements OAuthServerProvider {
     url.searchParams.set('code', code)
     if (pending.state) url.searchParams.set('state', pending.state)
     res.redirect(url.toString())
+  }
+
+  private renderConsentPage (consentId: string, csrf: string, pending: PendingAuth): string {
+    const client = this.store.get<OAuthClientInformationFull>(NS.clients, pending.clientId)
+    const clientName = escapeHtml(client?.client_name ?? pending.clientId)
+    const redirectHost = escapeHtml(new URL(pending.redirectUri).host)
+    const redirectUri = escapeHtml(pending.redirectUri)
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Authorize access</title>
+<style>body{font-family:system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem;color:#1a1a1a}
+.card{border:1px solid #ddd;border-radius:10px;padding:1.5rem}
+.warn{background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:.75rem 1rem;margin:1rem 0;font-size:.9rem}
+code{background:#f2f2f2;padding:.1rem .35rem;border-radius:4px;word-break:break-all}
+button{font-size:1rem;padding:.6rem 1.2rem;border-radius:8px;border:0;cursor:pointer;margin-right:.5rem}
+.ok{background:#1971c2;color:#fff}.no{background:#e9ecef}</style></head>
+<body><div class="card">
+<h2>Authorize access to the wiki</h2>
+<p>The application <strong>${clientName}</strong> is requesting access to Wiki.js on your behalf.</p>
+<p>If you approve, authorization data will be sent to:</p>
+<p><code>${redirectUri}</code></p>
+<div class="warn">Only approve if you started this and recognize <strong>${redirectHost}</strong>. Approving lets this application read and modify wiki pages using your permissions.</div>
+<form method="post" action="${escapeHtml(this.consentUrl)}">
+<input type="hidden" name="consent_id" value="${escapeHtml(consentId)}">
+<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+<button class="ok" type="submit" name="approve" value="yes">Approve</button>
+<button class="no" type="submit" name="approve" value="no">Deny</button>
+</form>
+</div></body></html>`
   }
 
   // ---- Token leg ---------------------------------------------------------
@@ -334,6 +455,10 @@ export class GoogleBackedOAuthProvider implements OAuthServerProvider {
         }
       }
     }
+    // Drop remembered client approvals so a re-login re-prompts for consent.
+    for (const [key] of this.store.entries<boolean>(NS.approvals)) {
+      if (key.startsWith(`${sessionId}|`)) this.store.delete(NS.approvals, key)
+    }
     if (session) this.opts.onRevokeSession?.(session)
   }
 
@@ -341,6 +466,13 @@ export class GoogleBackedOAuthProvider implements OAuthServerProvider {
     const cutoff = nowSec() - this.pendingTtl
     for (const [id, pending] of this.store.entries<PendingAuth>(NS.pending)) {
       if (pending.createdAt < cutoff) this.store.delete(NS.pending, id)
+    }
+  }
+
+  private pruneConsent (): void {
+    const cutoff = nowSec() - this.pendingTtl
+    for (const [id, record] of this.store.entries<ConsentPending>(NS.consentPending)) {
+      if (record.createdAt < cutoff) this.store.delete(NS.consentPending, id)
     }
   }
 

@@ -129,6 +129,33 @@ describe('OAuth + MCP e2e (fake Google, live Wiki.js)', () => {
     expect(result.error).toBe('access_denied')
   })
 
+  it('an attacker-registered redirect URI cannot silently steal a code (consent required)', async () => {
+    // Attacker registers their own client with an evil redirect URI.
+    const attacker = await harness.registerClient()
+    // Victim (John) walks the flow up to our Google callback, but stops
+    // at the consent page instead of a code being emitted to the attacker.
+    const verifier = 'a'.repeat(43)
+    const { createHash } = await import('node:crypto')
+    const challenge = createHash('sha256').update(verifier).digest('base64url')
+    harness.fakeGoogle.currentUser = JOHN
+    const authorizeUrl = new URL(`${harness.baseUrl}/authorize`)
+    authorizeUrl.searchParams.set('client_id', attacker.client_id)
+    authorizeUrl.searchParams.set('redirect_uri', 'http://127.0.0.1:59999/oauth/callback')
+    authorizeUrl.searchParams.set('response_type', 'code')
+    authorizeUrl.searchParams.set('code_challenge', challenge)
+    authorizeUrl.searchParams.set('code_challenge_method', 'S256')
+    authorizeUrl.searchParams.set('state', 'x')
+
+    const r1 = await fetch(authorizeUrl, { redirect: 'manual' })
+    const r2 = await fetch(r1.headers.get('location')!, { redirect: 'manual' })
+    const r3 = await fetch(r2.headers.get('location')!, { redirect: 'manual' })
+    // The callback must NOT 302 a code straight to the attacker; it must
+    // render a consent page the victim has to actively approve.
+    expect(r3.status).toBe(200)
+    const html = await r3.text()
+    expect(html).toMatch(/Approve/)
+  })
+
   it('revoked session invalidates live access tokens', async () => {
     const tokens = await harness.oauthFlow(clientId, KATE)
     const info = await harness.provider.verifyAccessToken(String(tokens.access_token))

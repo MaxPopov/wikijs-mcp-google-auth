@@ -27,22 +27,48 @@ function makeProvider (): { provider: GoogleBackedOAuthProvider, store: MemorySt
   return { provider, store }
 }
 
-/** Runs authorize + google callback, returns the issued authorization code. */
-async function runAuthLeg (provider: GoogleBackedOAuthProvider): Promise<string> {
-  let googleRedirect = ''
-  await provider.authorize(CLIENT, {
-    redirectUri: CLIENT.redirect_uris[0]!,
-    codeChallenge: 'challenge',
-    state: 'client-state'
-  }, { redirect: (url: string) => { googleRedirect = url } } as unknown as Response)
-  const pendingId = new URL(googleRedirect).searchParams.get('state')!
+/** Minimal express Response double capturing redirect + html body + status. */
+function fakeRes (): { res: Response, redirected: () => string | null, html: () => string | null, status: () => number } {
+  let redirect: string | null = null
+  let html: string | null = null
+  let statusCode = 200
+  const res = {
+    redirect: (url: string) => { redirect = url },
+    status: (code: number) => { statusCode = code; return res },
+    type: () => res,
+    send: (body: string) => { html = body }
+  }
+  return {
+    res: res as unknown as Response,
+    redirected: () => redirect,
+    html: () => html,
+    status: () => statusCode
+  }
+}
 
-  let clientRedirect = ''
-  await provider.handleGoogleCallback(
-    { query: { code: 'google-code', state: pendingId } } as never,
-    { redirect: (url: string) => { clientRedirect = url }, status: () => ({ send: () => {} }) } as never
-  )
-  const url = new URL(clientRedirect)
+async function authorizeToGoogleCallback (provider: GoogleBackedOAuthProvider, client = CLIENT, redirectUri = CLIENT.redirect_uris[0]!): Promise<ReturnType<typeof fakeRes>> {
+  const authRes = fakeRes()
+  await provider.authorize(client, { redirectUri, codeChallenge: 'challenge', state: 'client-state' }, authRes.res)
+  const pendingId = new URL(authRes.redirected()!).searchParams.get('state')!
+  const cbRes = fakeRes()
+  await provider.handleGoogleCallback({ query: { code: 'google-code', state: pendingId } } as never, cbRes.res)
+  return cbRes
+}
+
+/** Full leg including auto-approving the consent interstitial. */
+async function runAuthLeg (provider: GoogleBackedOAuthProvider): Promise<string> {
+  const cbRes = await authorizeToGoogleCallback(provider)
+  let clientRedirect: string | null = cbRes.redirected()
+  if (!clientRedirect) {
+    // Consent page shown — approve it.
+    const html = cbRes.html()!
+    const consentId = /name="consent_id" value="([^"]+)"/.exec(html)![1]
+    const csrf = /name="csrf" value="([^"]+)"/.exec(html)![1]
+    const consentRes = fakeRes()
+    provider.handleConsent({ body: { consent_id: consentId, csrf, approve: 'yes' } } as never, consentRes.res)
+    clientRedirect = consentRes.redirected()
+  }
+  const url = new URL(clientRedirect!)
   expect(url.origin + url.pathname).toBe(CLIENT.redirect_uris[0])
   expect(url.searchParams.get('state')).toBe('client-state')
   return url.searchParams.get('code')!
@@ -115,6 +141,48 @@ describe('GoogleBackedOAuthProvider', () => {
     provider.revokeSession(String(info.extra?.sessionId))
     await expect(provider.verifyAccessToken(tokens.access_token)).rejects.toThrow()
     await expect(provider.exchangeRefreshToken(CLIENT, tokens.refresh_token!)).rejects.toThrow()
+  })
+
+  it('does not release a code before the user consents (confused-deputy defense)', async () => {
+    const { provider } = makeProvider()
+    const cbRes = await authorizeToGoogleCallback(provider)
+    // No redirect with a code yet: an HTML consent page instead.
+    expect(cbRes.redirected()).toBeNull()
+    const html = cbRes.html()!
+    expect(html).toMatch(/Approve/)
+    expect(html).toContain(CLIENT.redirect_uris[0])
+  })
+
+  it('denying consent redirects with access_denied and issues no token', async () => {
+    const { provider } = makeProvider()
+    const cbRes = await authorizeToGoogleCallback(provider)
+    const html = cbRes.html()!
+    const consentId = /name="consent_id" value="([^"]+)"/.exec(html)![1]
+    const csrf = /name="csrf" value="([^"]+)"/.exec(html)![1]
+    const denyRes = fakeRes()
+    provider.handleConsent({ body: { consent_id: consentId, csrf, approve: 'no' } } as never, denyRes.res)
+    const url = new URL(denyRes.redirected()!)
+    expect(url.searchParams.get('error')).toBe('access_denied')
+    expect(url.searchParams.get('code')).toBeNull()
+  })
+
+  it('rejects consent with a wrong CSRF token', async () => {
+    const { provider } = makeProvider()
+    const cbRes = await authorizeToGoogleCallback(provider)
+    const consentId = /name="consent_id" value="([^"]+)"/.exec(cbRes.html()!)![1]
+    const res = fakeRes()
+    provider.handleConsent({ body: { consent_id: consentId, csrf: 'wrong', approve: 'yes' } } as never, res.res)
+    expect(res.status()).toBe(400)
+    expect(res.redirected()).toBeNull()
+  })
+
+  it('remembers approval per client so the second authorization skips consent', async () => {
+    const { provider } = makeProvider()
+    await runAuthLeg(provider) // first time: approves
+    const second = await authorizeToGoogleCallback(provider)
+    // Same user + client + redirect: straight to a code, no consent page.
+    expect(second.html()).toBeNull()
+    expect(new URL(second.redirected()!).searchParams.get('code')).toBeTruthy()
   })
 
   it('revokeToken removes the presented token only for its client', async () => {

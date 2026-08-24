@@ -9,6 +9,35 @@ export interface AppOptions {
   publicUrl: string
   provider: GoogleBackedOAuthProvider
   mcpDeps: McpDeps
+  /** Max MCP requests per access token per minute (0 = unlimited). */
+  mcpRateLimitPerMinute?: number
+}
+
+/** Small sliding-window limiter keyed by access token. */
+function mcpRateLimiter (limitPerMinute: number) {
+  const hits = new Map<string, number[]>()
+  return (req: Request, res: Response, next: () => void): void => {
+    const token = req.auth?.token ?? req.ip ?? 'anonymous'
+    const now = Date.now()
+    const windowStart = now - 60_000
+    const list = (hits.get(token) ?? []).filter(t => t > windowStart)
+    if (list.length >= limitPerMinute) {
+      res.status(429).json({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Rate limit exceeded, retry later' },
+        id: null
+      })
+      return
+    }
+    list.push(now)
+    hits.set(token, list)
+    if (hits.size > 10_000) {
+      for (const [k, v] of hits) {
+        if (!v.some(t => t > windowStart)) hits.delete(k)
+      }
+    }
+    next()
+  }
 }
 
 /**
@@ -28,6 +57,14 @@ export function createApp (opts: AppOptions): Express {
   // would let clients spoof X-Forwarded-For and bypass IP rate limits.
   app.set('trust proxy', 1)
   app.disable('x-powered-by')
+
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    res.setHeader('Referrer-Policy', 'no-referrer')
+    res.setHeader('X-Frame-Options', 'DENY')
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+    next()
+  })
 
   // Minimal CORS for browser-based MCP clients (e.g. MCP Inspector).
   app.use((req, res, next) => {
@@ -54,6 +91,10 @@ export function createApp (opts: AppOptions): Express {
     void provider.handleGoogleCallback(req, res)
   })
 
+  app.post('/oauth/consent', express.urlencoded({ extended: false }), (req, res) => {
+    provider.handleConsent(req, res)
+  })
+
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true })
   })
@@ -63,8 +104,10 @@ export function createApp (opts: AppOptions): Express {
     resourceMetadataUrl: `${publicUrl}/.well-known/oauth-protected-resource/mcp`
   })
 
+  const rateLimit = mcpRateLimiter(opts.mcpRateLimitPerMinute ?? 120)
+
   // Stateless Streamable HTTP: a fresh server+transport pair per request.
-  app.post('/mcp', bearer, express.json({ limit: '4mb' }), (req: Request, res: Response) => {
+  app.post('/mcp', bearer, rateLimit, express.json({ limit: '4mb' }), (req: Request, res: Response) => {
     void (async () => {
       const server = buildMcpServer(mcpDeps)
       const transport = new StreamableHTTPServerTransport({

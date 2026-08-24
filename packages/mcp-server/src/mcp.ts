@@ -3,11 +3,26 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js'
 import { decodeJwt } from 'jose'
 import type { WikijsTokenBroker, DelegatedIdentity } from './wikijs/broker.js'
 import type { WikijsClient } from './wikijs/client.js'
+import type { SearchBackend } from './search/backend.js'
 import { registerWikiTools } from './tools/wiki.js'
+
+export interface AuditEvent {
+  tool: string
+  user: string
+  outcome: 'ok' | 'denied' | 'error'
+  detail?: string
+}
 
 export interface McpDeps {
   broker: WikijsTokenBroker
   wikiClient: WikijsClient
+  /**
+   * Retrieval backend for search_wiki. Defaults to Wiki.js native
+   * search; swap for the RAG service backend when it exists.
+   */
+  searchBackend?: SearchBackend
+  /** Structured audit sink for tool calls (who did what, no content). */
+  audit?: (event: AuditEvent) => void
 }
 
 export class NotAuthenticatedError extends Error {
@@ -47,6 +62,7 @@ export function buildMcpServer (deps: McpDeps): McpServer {
     inputSchema: {}
   }, async (_args, extra) => {
     const identity = identityFromAuthInfo(extra.authInfo)
+    deps.audit?.({ tool: 'whoami', user: identity.email, outcome: 'ok' })
     const jwt = await deps.broker.getToken(identity)
     const claims = decodeJwt(jwt) as {
       id?: number

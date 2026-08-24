@@ -3,6 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js'
 import { identityFromAuthInfo, type McpDeps } from '../mcp.js'
 import { WikijsGraphQLError } from '../wikijs/client.js'
+import { WikijsNativeSearch } from '../search/backend.js'
 
 type ToolResult = {
   content: Array<{ type: 'text', text: string }>
@@ -26,19 +27,28 @@ function fail (message: string): ToolResult {
 async function withWikiJwt (
   deps: McpDeps,
   authInfo: AuthInfo | undefined,
+  tool: string,
   op: (jwt: string) => Promise<ToolResult>
 ): Promise<ToolResult> {
   const identity = identityFromAuthInfo(authInfo)
+  const audit = (outcome: 'ok' | 'denied' | 'error', detail?: string): void => {
+    deps.audit?.({ tool, user: identity.email, outcome, detail })
+  }
   try {
     const jwt = await deps.broker.getToken(identity)
-    return await op(jwt)
+    const result = await op(jwt)
+    audit(result.isError ? 'denied' : 'ok', result.isError ? result.content[0]?.text : undefined)
+    return result
   } catch (err) {
     if (err instanceof WikijsGraphQLError) {
       if (/not authorized|forbidden/i.test(err.message)) {
+        audit('denied', err.message)
         return fail('Wiki.js denied this operation: you do not have permission for this page or action. This is enforced by Wiki.js groups/page rules, not by the MCP server.')
       }
+      audit('error', err.message)
       return fail(`Wiki.js error: ${err.message}`)
     }
+    audit('error', (err as Error).message)
     throw err
   }
 }
@@ -107,12 +117,9 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
       query: z.string().min(1).describe('Search terms'),
       locale: z.string().optional().describe('Locale filter, e.g. "en"')
     }
-  }, async ({ query, locale }, extra) => withWikiJwt(deps, extra.authInfo, async jwt => {
-    const data = await deps.wikiClient.graphql<{ pages: { search: { results: Array<Record<string, unknown>>, suggestions: string[], totalHits: number } } }>(
-      `query ($q: String!, $locale: String) { pages { search(query: $q, locale: $locale) {
-        results { id title description path locale } suggestions totalHits } } }`,
-      { q: query, locale: locale ?? null }, jwt)
-    const s = data.pages.search
+  }, async ({ query, locale }, extra) => withWikiJwt(deps, extra.authInfo, 'search_wiki', async jwt => {
+    const backend = deps.searchBackend ?? new WikijsNativeSearch(deps.wikiClient)
+    const s = await backend.search(query, { wikijsJwt: jwt, locale })
     return ok({ totalHits: s.totalHits, results: s.results, suggestions: s.suggestions })
   }))
 
@@ -124,7 +131,7 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
       path: z.string().optional().describe('Page path without leading slash, e.g. "engineering/onboarding"'),
       locale: z.string().default('en').describe('Page locale (used with path)')
     }
-  }, async ({ id, path, locale }, extra) => withWikiJwt(deps, extra.authInfo, async jwt => {
+  }, async ({ id, path, locale }, extra) => withWikiJwt(deps, extra.authInfo, 'get_page', async jwt => {
     if ((id === undefined) === (path === undefined)) {
       return fail('Provide exactly one of "id" or "path".')
     }
@@ -141,7 +148,7 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
       limit: z.number().int().positive().max(500).default(100).describe('Maximum number of pages to return'),
       orderBy: z.enum(['PATH', 'TITLE', 'CREATED', 'UPDATED']).default('PATH')
     }
-  }, async ({ pathPrefix, limit, orderBy }, extra) => withWikiJwt(deps, extra.authInfo, async jwt => {
+  }, async ({ pathPrefix, limit, orderBy }, extra) => withWikiJwt(deps, extra.authInfo, 'list_pages', async jwt => {
     const data = await deps.wikiClient.graphql<{ pages: { list: Array<{ id: number, path: string, locale: string, title: string | null, description: string | null, isPublished: boolean, updatedAt: string }> } }>(
       `query ($orderBy: PageOrderBy) { pages { list(orderBy: $orderBy) {
         id path locale title description isPublished updatedAt } } }`,
@@ -168,7 +175,7 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
       tags: z.array(z.string()).default([]),
       isPublished: z.boolean().default(true)
     }
-  }, async ({ path, title, content, description, locale, tags, isPublished }, extra) => withWikiJwt(deps, extra.authInfo, async jwt => {
+  }, async ({ path, title, content, description, locale, tags, isPublished }, extra) => withWikiJwt(deps, extra.authInfo, 'create_page', async jwt => {
     const data = await deps.wikiClient.graphql<{ pages: { create: MutationResponse } }>(
       `mutation ($content: String!, $description: String!, $editor: String!, $isPublished: Boolean!, $isPrivate: Boolean!, $locale: String!, $path: String!, $tags: [String]!, $title: String!) {
         pages { create(content: $content, description: $description, editor: $editor, isPublished: $isPublished, isPrivate: $isPrivate, locale: $locale, path: $path, tags: $tags, title: $title) {
@@ -204,7 +211,7 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
       tags: z.array(z.string()).optional(),
       isPublished: z.boolean().optional()
     }
-  }, async ({ id, path, locale, content, title, description, tags, isPublished }, extra) => withWikiJwt(deps, extra.authInfo, async jwt => {
+  }, async ({ id, path, locale, content, title, description, tags, isPublished }, extra) => withWikiJwt(deps, extra.authInfo, 'update_page', async jwt => {
     if (id === undefined && path === undefined) {
       return fail('Provide "id" or "path" to identify the page.')
     }
@@ -243,7 +250,7 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
     annotations: {
       destructiveHint: true
     }
-  }, async ({ id }, extra) => withWikiJwt(deps, extra.authInfo, async jwt => {
+  }, async ({ id }, extra) => withWikiJwt(deps, extra.authInfo, 'delete_page', async jwt => {
     const data = await deps.wikiClient.graphql<{ pages: { delete: MutationResponse } }>(
       `mutation ($id: Int!) {
         pages { delete(id: $id) { responseResult { succeeded errorCode slug message } } }
