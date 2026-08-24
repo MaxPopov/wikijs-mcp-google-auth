@@ -1,0 +1,41 @@
+key: mcpdelegation
+title: MCP Delegation
+description: Server-to-server delegation for the Wiki.js MCP layer. Verifies signed assertions from the MCP server and lets Wiki.js issue its own native JWT for the delegated user.
+author: wikijs-mcp-google-auth
+logo: https://static.requarks.io/logo/wikijs.svg
+color: blue-grey darken-2
+website: https://github.com/MaxPopov/wikijs-mcp-google-auth
+isAvailable: true
+useForm: true
+usernameType: email
+props:
+  publicKey:
+    type: String
+    title: Assertion Public Key (PEM)
+    hint: RSA public key (PEM / SPKI) used to verify RS256 delegation assertions signed by the MCP server. REQUIRED — the strategy rejects all logins until this is set.
+    multiline: true
+    order: 1
+  audience:
+    type: String
+    title: Expected Audience
+    hint: Exact value the "aud" claim of incoming assertions must equal.
+    default: 'urn:wikijs:mcp-delegation'
+    order: 2
+  issuer:
+    type: String
+    title: Expected Issuer
+    hint: Exact value the "iss" claim of incoming assertions must equal.
+    default: 'urn:wikijs-mcp-google-auth'
+    order: 3
+  providerPriority:
+    type: String
+    title: User Lookup Provider Priority
+    hint: Comma-separated list of authentication provider keys (instance keys or module keys, e.g. "google,oidc,local,mcpdelegation") searched in order when matching the delegated user by email.
+    default: 'google,oidc,local,mcpdelegation'
+    order: 4
+  maxTokenAge:
+    type: Number
+    title: Max Assertion Age (seconds)
+    hint: Assertions issued longer ago than this are rejected even if their "exp" has not passed.
+    default: 120
+    order: 5

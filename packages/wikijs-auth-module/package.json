@@ -1,0 +1,15 @@
+{
+  "name": "@wikijs-mcp/wikijs-auth-module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Wiki.js 2.5 authentication module: verifies signed delegation assertions from the MCP server and lets Wiki.js issue its own native JWT",
+  "license": "Apache-2.0",
+  "main": "authentication.js",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "vitest": "^2.1.8"
+  }
+}
