@@ -192,8 +192,14 @@ wikijs-mcp-google-auth/
 │       ├── authentication.js
 │       └── README.md                # встановлення (volume mount, admin UI)
 ├── deploy/
-│   ├── docker-compose.dev.yml       # Wiki.js 2.5.303 + Postgres + MCP server
-│   └── seed/                        # тестові users/groups/page rules
+│   ├── docker-compose.dev.yml       # ІЗОЛЬОВАНИЙ тестовий стенд: Wiki.js 2.5.303
+│   │                                #   + Postgres + MCP server (build із сорсів) + сід.
+│   │                                #   Тільки для розробки і e2e/CI, бойової wiki не торкається.
+│   ├── docker-compose.prod.yml      # Прод: ЛИШЕ контейнер MCP-сервера (тегований image),
+│   │                                #   через env вказує на існуючий бойовий Wiki.js.
+│   │                                #   Wiki.js у прод НЕ деплоїмо — він уже існує;
+│   │                                #   auth-модуль ставиться на нього окремо (README модуля).
+│   └── seed/                        # тестові users/groups/page rules (тільки для dev-стенду)
 ├── docs/
 │   ├── adr/                         # архітектурні рішення
 │   └── rag-integration.md           # контракт для майбутнього RAG-сервісу
@@ -205,11 +211,18 @@ wikijs-mcp-google-auth/
 ### Phase 0 — Скеле і dev-середовище
 
 - Монорепо (npm workspaces), TypeScript, лінт/тести, CI (build + tests).
-- `docker-compose.dev.yml`: Wiki.js 2.5.303 + Postgres + скрипт-сід:
+- Гілки `dev` і `main` за схемою з §7.1.
+- `docker-compose.dev.yml` — **ізольований тестовий стенд** (не має жодного
+  стосунку до бойового Wiki.js): Wiki.js 2.5.303 + Postgres + скрипт-сід:
   два користувачі (John/Engineering, Kate/Management), групи, Page Rules,
-  приватний розділ (`/management/*` недоступний Engineering).
+  приватний розділ (`/management/*` недоступний Engineering). Призначення —
+  дев-цикл і e2e: ACL-сценарії (forbidden read/update, delete,
+  auto-provisioning) на бойовій wiki ганяти не можна.
+- `docker-compose.prod.yml` — скелет прод-деплою: лише MCP-сервер,
+  конфігурація через env (URL бойового Wiki.js, ключі, Google client);
+  фіналізується у Phase 4.
 
-**Готово, коли:** одна команда піднімає відтворюване середовище з тестовими ACL.
+**Готово, коли:** одна команда піднімає відтворюваний dev-стенд з тестовими ACL.
 
 ### Phase 1 — Делегація і нативний JWT (ядро всієї схеми)
 
@@ -260,8 +273,9 @@ SEARCH "salary"           (Kate) → сторінка присутня
   деактивації користувача у Wiki.js (JWT перестає оновлюватись).
 - Аудит-лог: хто, який tool, яка сторінка, результат (без контенту).
 - Rate limiting на OAuth-ендпоінти і tools; secure headers; secrets через env.
-- Production deploy: Docker image, reverse proxy + HTTPS, інструкція
-  встановлення auth-модуля на бойовий Wiki.js.
+- Production deploy: фіналізований `docker-compose.prod.yml` (тегований
+  image MCP-сервера з релізу `main`, див. §7.1), reverse proxy + HTTPS,
+  інструкція встановлення auth-модуля на бойовий Wiki.js.
 - `security-review` прогін по всьому коду перед релізом.
 
 **Готово, коли:** сервер працює на публічному HTTPS, реальні користувачі
@@ -301,6 +315,20 @@ Phase 1 — критичний шлях і головний ризик усіє�
 OAuth-частиною: якщо делегація через auth-модуль з якоїсь причини не запрацює,
 переглядати треба архітектуру, а не tools. Phase 2 і Phase 3 після цього
 майже незалежні (tools можна розробляти проти JWT з Phase 1 CLI).
+
+### 7.1 Git workflow і релізи
+
+- **`dev`** — інтеграційна гілка. Робота ведеться у feature-гілках і
+  зливається у `dev` через PR; CI (build + tests + e2e на dev-стенді)
+  має бути зеленим перед мержем.
+- **`main`** — тільки стабільні релізи. Реліз = мерж `dev` → `main` +
+  semver-тег `vX.Y.Z`; тег запускає збірку Docker image MCP-сервера
+  з відповідним тегом — саме цей image використовує
+  `docker-compose.prod.yml`. У прод ніколи не деплоїмо «latest з dev»,
+  лише тегований image з `main`.
+- Версіонування semver: major — зміна контракту (tools, делегаційний
+  протокол, формат assertion), minor — нова функціональність,
+  patch — фікси.
 
 ## 8. Ризики та відкриті питання
 
