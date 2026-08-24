@@ -16,6 +16,27 @@ function env (name: string, fallback?: string): string {
   throw new Error(`Missing required environment variable ${name}`)
 }
 
+export interface ServerSettings {
+  port: number
+  publicUrl: string
+  /** JSON file for OAuth/session state; empty = in-memory only. */
+  sessionStoreFile: string
+  accessTokenTtlSeconds: number
+  refreshTokenTtlSeconds: number
+  logLevel: string
+}
+
+export function loadServerSettings (): ServerSettings {
+  return {
+    port: Number(env('PORT', '8000')),
+    publicUrl: env('PUBLIC_URL').replace(/\/+$/, ''),
+    sessionStoreFile: process.env.SESSION_STORE_FILE ?? '',
+    accessTokenTtlSeconds: Number(env('ACCESS_TOKEN_TTL', '3600')),
+    refreshTokenTtlSeconds: Number(env('REFRESH_TOKEN_TTL', String(30 * 24 * 3600))),
+    logLevel: env('LOG_LEVEL', 'info')
+  }
+}
+
 export function loadWikijsSettings (): WikijsSettings {
   let privateKeyPem = process.env.MCP_ASSERTION_PRIVATE_KEY ?? ''
   if (!privateKeyPem) {
