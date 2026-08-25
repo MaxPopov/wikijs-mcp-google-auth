@@ -13,7 +13,11 @@ export default defineConfig({
   use: {
     baseURL: process.env.MCP_URL ?? 'http://localhost:8000',
     trace: 'retain-on-failure',
-    screenshot: 'only-on-failure'
+    screenshot: 'only-on-failure',
+    // Video of failing tests by default (CI debugging); PW_VIDEO=on forces
+    // it always, PW_SLOWMO=<ms> slows the browser for a watchable capture.
+    video: (process.env.PW_VIDEO as 'on' | 'off' | 'retain-on-failure') ?? 'retain-on-failure',
+    launchOptions: process.env.PW_SLOWMO ? { slowMo: Number(process.env.PW_SLOWMO) } : undefined
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } }
