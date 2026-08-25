@@ -1,0 +1,22 @@
+{
+  "name": "wikijs-mcp-google-auth",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP layer with Google auth delegation on top of Wiki.js native authorization",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @wikijs-mcp/server",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "stand:up": "docker compose -f deploy/docker-compose.dev.yml up -d db wiki",
+    "stand:down": "docker compose -f deploy/docker-compose.dev.yml down -v",
+    "stand:seed": "node deploy/seed/run.mjs",
+    "e2e": "npm run e2e -w @wikijs-mcp/server"
+  }
+}

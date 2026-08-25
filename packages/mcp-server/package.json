@@ -1,0 +1,37 @@
+{
+  "name": "@wikijs-mcp/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote MCP server: Google identity -> native Wiki.js JWT delegation -> Wiki.js GraphQL tools",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "wikijs-mcp-server": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --exclude '**/e2e/**' --passWithNoTests",
+    "e2e": "vitest run test/e2e --passWithNoTests",
+    "dev": "tsx src/index.ts",
+    "cli": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "express": "^4.21.2",
+    "jose": "^5.9.6",
+    "pino": "^9.5.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
