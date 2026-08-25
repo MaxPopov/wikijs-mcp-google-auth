@@ -1,0 +1,47 @@
+name: UI e2e
+
+on:
+  push:
+    branches: [main, dev]
+
+# Browser UI end-to-end: the fake Google IdP emulator + Wiki.js + MCP
+# server + a Playwright runner, all in docker, exercising the OAuth +
+# consent flow under different roles. Runs only in the e2e docker stack.
+jobs:
+  ui-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # node_modules is bind-mounted into the idp and playwright containers
+      # (jose/express for the emulator, @playwright/test for the runner).
+      - run: npm ci
+      - name: Build MCP image
+        run: docker compose -f deploy/docker-compose.e2e.yml build mcp
+      # No --wait on wiki (its Docker healthcheck is unreliable on CI
+      # runners). The seed service polls Wiki.js over HTTP itself, so it is
+      # the real wiki-readiness gate; idp/mcp keep reliable healthchecks.
+      - name: Start backend (db, wiki, idp)
+        run: docker compose -f deploy/docker-compose.e2e.yml up -d db wiki idp
+      - name: Seed fixtures + keys
+        run: docker compose -f deploy/docker-compose.e2e.yml run --rm seed
+      - name: Start MCP server
+        run: docker compose -f deploy/docker-compose.e2e.yml up -d --wait mcp
+      - name: Run Playwright role tests
+        run: docker compose -f deploy/docker-compose.e2e.yml run --rm playwright
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose -f deploy/docker-compose.e2e.yml logs --no-color --tail=200
+      - name: Collect Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: packages/e2e-ui/playwright-report
+          if-no-files-found: ignore
+      - name: Teardown
+        if: always()
+        run: docker compose -f deploy/docker-compose.e2e.yml down -v

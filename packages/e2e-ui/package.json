@@ -1,0 +1,20 @@
+{
+  "name": "@wikijs-mcp/e2e-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser UI end-to-end tests (Playwright) and a standalone fake Google IdP emulator. Test-only — never part of any published artifact.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "idp": "node idp/server.mjs",
+    "ui": "playwright test"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "jose": "^5.9.6"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "@playwright/test": "1.56.1"
+  }
+}
