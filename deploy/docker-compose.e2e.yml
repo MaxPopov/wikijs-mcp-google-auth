@@ -79,8 +79,11 @@ services:
     image: node:22-alpine
     working_dir: /app
     depends_on:
+      # service_started (not _healthy): Wiki.js's Docker healthcheck is
+      # unreliable on CI runners. run.mjs polls Wiki.js over HTTP and
+      # finalizes setup itself, so it is the real readiness gate.
       wiki:
-        condition: service_healthy
+        condition: service_started
     environment:
       WIKI_URL: http://wiki:3000
       MCP_KEYS_DIR: /keys

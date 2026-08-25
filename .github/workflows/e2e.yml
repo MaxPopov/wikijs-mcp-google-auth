@@ -17,8 +17,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # No --wait on wiki: its Docker healthcheck is unreliable on CI
+      # runners. seed (run.mjs) polls Wiki.js over HTTP itself and is the
+      # real readiness gate.
       - name: Start Wiki.js dev stand
-        run: docker compose -f deploy/docker-compose.dev.yml up -d --wait db wiki
+        run: docker compose -f deploy/docker-compose.dev.yml up -d db wiki
       - name: Seed fixture ACL
         run: node deploy/seed/run.mjs
       - name: Verify seed produced the assertion key
