@@ -45,12 +45,12 @@ services:
       DB_NAME: wiki
     volumes:
       - ../packages/wikijs-auth-module:/wiki/server/modules/authentication/mcpdelegation:ro
-    healthcheck:
-      test: ['CMD', 'node', '-e', "require('http').get('http://localhost:3000/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
-      interval: 5s
-      timeout: 5s
-      retries: 60
-      start_period: 30s
+    # No Docker healthcheck on purpose. Its `localhost:3000` probe is
+    # unreliable on CI runners (localhost can resolve to IPv6 ::1 while
+    # Wiki.js listens on IPv4), which would leave the container "unhealthy"
+    # and make `up --wait mcp` (wiki is a transitive dependency) fail even
+    # though Wiki.js is serving. The seed service polls Wiki.js over HTTP
+    # (http://wiki:3000) and is the real readiness gate.
 
   idp:
     image: node:22-alpine
