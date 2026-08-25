@@ -226,7 +226,9 @@ npm run stand:down
 
 Тестовий стенд: `admin@example.com/admin1234!`, `john@example.com`
 (Engineering, без доступу до `/management/*`), `kate@example.com`
-(Management). CI ганяє юніт + повний e2e на кожен push/PR у `dev`/`main`.
+(Management). На кожен PR ганяються швидкі перевірки (`CI`: лінт + юніт +
+білд); важкі docker-e2e (`e2e`) і браузерні `ui-e2e` — лише на push у
+`dev`/`main` (тобто перед мержем), щоб не гальмувати ітерації на PR.
 
 ### Браузерні UI e2e (Playwright) під ролями
 
@@ -251,7 +253,7 @@ docker compose -f $C down -v
 whoami і сторінки обмежені правами ролі (John не бачить `management/*`,
 Kate бачить); deny → `access_denied`; акаунт поза Workspace-доменом
 відхиляється ще до згоди. Окремий CI-workflow (`ui-e2e`) робить це на
-кожен push/PR.
+push у `dev`/`main`.
 
 Запуск MCP-сервера проти стенда вручну:
 

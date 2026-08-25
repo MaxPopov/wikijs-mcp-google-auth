@@ -1,5 +1,6 @@
 name: CI
 
+# Fast checks — run on every PR and on pushes to dev/main.
 on:
   push:
     branches: [main, dev]
@@ -18,25 +19,3 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
-
-  e2e:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - name: Start Wiki.js dev stand
-        run: docker compose -f deploy/docker-compose.dev.yml up -d --wait db wiki
-      - name: Seed fixture ACL
-        run: node deploy/seed/run.mjs
-      - name: Verify seed produced the assertion key
-        run: test -f deploy/keys/mcp-assertion-key.pem
-      - name: Run e2e tests
-        run: npm run e2e
-      - name: Teardown
-        if: always()
-        run: docker compose -f deploy/docker-compose.dev.yml down -v
