@@ -39,6 +39,11 @@ jobs:
         run: |
           v="$(node -p "require('./package.json').version")"
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          # GHCR (Docker) requires the repository path to be lowercase, but
+          # github.repository_owner keeps the account's original casing
+          # (e.g. "MaxPopov"). Lowercase it so the image tag is valid.
+          owner_lc="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${owner_lc}/wikijs-mcp-server" >> "$GITHUB_OUTPUT"
           if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Tag v$v already exists — skipping release."
@@ -63,8 +68,8 @@ jobs:
           file: packages/mcp-server/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/wikijs-mcp-server:v${{ steps.meta.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/wikijs-mcp-server:latest
+            ${{ steps.meta.outputs.image }}:v${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
 
       # Creates the git tag at this commit AND the GitHub Release. Uses the
       # built-in GITHUB_TOKEN automatically (no token input needed).
