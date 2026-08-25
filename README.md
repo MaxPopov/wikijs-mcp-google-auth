@@ -1,82 +1,83 @@
 # wikijs-mcp-google-auth
 
-**MCP-шар поверх існуючого Wiki.js 2.5.x**: корпоративний користувач логіниться
-через Google Workspace і працює з wiki через LLM (claude.ai, Claude Desktop,
-будь-який MCP-клієнт) — **строго в межах своїх прав у Wiki.js**.
+**An MCP layer on top of an existing Wiki.js 2.5.x**: a corporate user signs in
+with Google Workspace and works with the wiki through an LLM (claude.ai, Claude
+Desktop, any MCP client) — **strictly within their own Wiki.js permissions**.
 
-Ключовий принцип: **Wiki.js — єдине джерело правди для авторизації.**
-MCP-сервер не має власних users/groups/permissions і жодного global API key.
-Кожна операція виконується з нативним Wiki.js JWT конкретного користувача,
-і рішення «можна/не можна» ухвалює сам Wiki.js (Groups / Permissions / Page
-Rules).
+Core principle: **Wiki.js is the single source of truth for authorization.**
+The MCP server has no users/groups/permissions of its own and no global API key.
+Every operation runs under the individual user's native Wiki.js JWT, and Wiki.js
+itself decides allow/deny (Groups / Permissions / Page Rules).
 
 ```
 Google Workspace ──OAuth/OIDC──▶ MCP Server ──signed assertion──▶ Wiki.js
-                                     │         auth module «mcpdelegation»
-                                     │         → refreshToken() → нативний JWT
+                                     │         auth module "mcpdelegation"
+                                     │         → refreshToken() → native JWT
                                      │
- MCP клієнт (claude.ai / Desktop) ◀──┴── tools: search / get / list /
+ MCP client (claude.ai / Desktop) ◀──┴── tools: search / get / list /
                                           create / update / delete / whoami
-                                          (усі — через GraphQL з JWT юзера)
+                                          (all via GraphQL with the user's JWT)
 ```
 
-## Складові
+## Components
 
-| Директорія | Що це |
+| Directory | What it is |
 |---|---|
-| `packages/wikijs-auth-module/` | Custom authentication module для Wiki.js 2.5.x — приймає підписані RS256-assertions від MCP-сервера і віддає нативний Wiki.js JWT ([деталі](packages/wikijs-auth-module/README.md)) |
-| `packages/mcp-server/` | Віддалений MCP-сервер (Streamable HTTP): OAuth 2.1 authorization server для MCP-клієнтів поверх Google OIDC + token broker + tools |
-| `deploy/docker-compose.dev.yml` | Ізольований тестовий стенд (Wiki.js 2.5.303 + Postgres + сід ACL) — **тільки для розробки/CI** |
-| `deploy/docker-compose.prod.yml` | Прод-деплой: лише MCP-сервер, що вказує на ваш існуючий Wiki.js |
-| `deploy/seed/seed.mjs` | Ідемпотентний сід тестового стенда |
+| `packages/wikijs-auth-module/` | Custom authentication module for Wiki.js 2.5.x — verifies RS256 assertions signed by the MCP server and returns a native Wiki.js JWT ([details](packages/wikijs-auth-module/README.md)) |
+| `packages/mcp-server/` | Remote MCP server (Streamable HTTP): an OAuth 2.1 authorization server for MCP clients on top of Google OIDC + token broker + tools |
+| `packages/e2e-ui/` | Test-only: browser UI e2e (Playwright) and a standalone fake Google IdP emulator |
+| `deploy/docker-compose.dev.yml` | Isolated test stand (Wiki.js 2.5.303 + Postgres + ACL seed) — **for development/CI only** |
+| `deploy/docker-compose.e2e.yml` | Full UI e2e stack (fake IdP + Wiki.js + MCP + Playwright) — **test-only** |
+| `deploy/docker-compose.prod.yml` | Production deploy: only the MCP server, pointing at your existing Wiki.js |
+| `deploy/seed/run.mjs` | Entry point to seed the test stand (`seed.mjs` is the library) |
 
-## Як це працює
+## How it works
 
-1. MCP-клієнт підключається до `https://mcp.company.com/mcp` і проходить
-   OAuth 2.1 (Dynamic Client Registration + PKCE). Google не підтримує DCR,
-   тому MCP-сервер сам є authorization server-ом для клієнтів, а Google
-   використовується лише для автентифікації людини. Google-токени назовні
-   не виходять; клієнти отримують opaque-токени MCP-сервера. Після
-   Google-логіну користувач бачить **екран згоди**, де названо застосунок і
-   його redirect URI, — це захист від confused-deputy (щоб чужий
-   зареєстрований клієнт не отримав токен користувача без його відома);
-   згода запам'ятовується per-user на кожен клієнт.
-2. `id_token` від Google верифікується (підпис, `iss`, `aud`,
-   `email_verified`, **`hd` = ваш Workspace-домен**).
-3. Token broker MCP-сервера обмінює Google-ідентичність на **нативний
-   Wiki.js JWT**: підписує коротку RS256-assertion (TTL 60 с, унікальний
-   `jti`) і викликає штатну GraphQL-мутацію `authentication.login` зі
-   стратегією `mcpdelegation`. Модуль у Wiki.js верифікує assertion,
-   знаходить користувача за email і повертає JWT через стандартний
-   `refreshToken()`-флоу. JWT кешується і оновлюється до закінчення строку.
-4. Кожен виклик tool іде у Wiki.js GraphQL з `Authorization: Bearer <JWT
-   користувача>`. Заборонена сторінка не прочитається, не зміниться і **не
-   з'явиться у пошуку чи списках** — це перевірено e2e-тестами (28 тестів,
-   матриця allowed/forbidden для двох користувачів з різними групами).
+1. The MCP client connects to `https://mcp.company.com/mcp` and runs OAuth 2.1
+   (Dynamic Client Registration + PKCE). Google does not support DCR, so the MCP
+   server is itself the authorization server for clients, and Google is used only
+   to authenticate the human. Google tokens never leave the server; clients
+   receive the MCP server's own opaque tokens. After the Google login the user
+   sees a **consent screen** naming the application and its redirect URI — a
+   confused-deputy defense (so a third-party registered client cannot obtain the
+   user's token without their knowledge); the approval is remembered per user
+   per client.
+2. Google's `id_token` is verified (signature, `iss`, `aud`, `email_verified`,
+   **`hd` = your Workspace domain**).
+3. The MCP server's token broker exchanges the Google identity for a **native
+   Wiki.js JWT**: it signs a short-lived RS256 assertion (TTL 60 s, unique `jti`)
+   and calls the standard GraphQL mutation `authentication.login` with the
+   `mcpdelegation` strategy. The Wiki.js module verifies the assertion, resolves
+   the user by email, and returns a JWT via the standard `refreshToken()` flow.
+   The JWT is cached and refreshed before it expires.
+4. Every tool call goes to Wiki.js GraphQL with `Authorization: Bearer <user's
+   JWT>`. A forbidden page cannot be read or changed and **does not appear in
+   search or listings** — verified by e2e tests (allow/forbidden matrix for two
+   users in different groups).
 
 ## Tools
 
-| Tool | Опис |
+| Tool | Description |
 |---|---|
-| `whoami` | Ідентичність користувача + його Wiki.js групи і permissions (діагностика доступу) |
-| `search_wiki` | Повнотекстовий пошук; результати фільтруються правами користувача |
-| `get_page` | Сторінка за id або path (метадані + повний markdown) |
-| `list_pages` | Список видимих користувачу сторінок (фільтр за префіксом шляху) |
-| `create_page` | Створення сторінки (markdown) |
-| `update_page` | Оновлення: read-merge-write, незмінені поля зберігаються |
-| `delete_page` | Видалення (destructive, Wiki.js перевіряє `delete:pages`) |
+| `whoami` | The user's identity + their Wiki.js groups and permissions (access diagnostics) |
+| `search_wiki` | Full-text search; results are filtered by the user's permissions |
+| `get_page` | A page by id or path (metadata + full markdown) |
+| `list_pages` | Pages visible to the user (filter by path prefix) |
+| `create_page` | Create a page (markdown) |
+| `update_page` | Update: read-merge-write, unspecified fields are preserved |
+| `delete_page` | Delete (destructive, Wiki.js enforces `delete:pages`) |
 
 ---
 
-# Інтеграція з вашим Wiki.js: покрокова інструкція
+# Integrating with your Wiki.js: step-by-step
 
-Потрібно: Wiki.js **2.5.x** (перевірено на 2.5.303) з доступом до його
-файлової системи/Docker-конфігурації; хост для MCP-сервера з публічним
-HTTPS; адмін-доступ до Google Cloud Console вашого Workspace.
+You need: Wiki.js **2.5.x** (tested on 2.5.303) with access to its file
+system / Docker configuration; a host for the MCP server with a public HTTPS
+endpoint; admin access to your Workspace's Google Cloud Console.
 
-## Крок 1. Встановіть auth-модуль у Wiki.js
+## Step 1. Install the auth module in Wiki.js
 
-**Docker:** додайте volume у сервіс wiki і перезапустіть контейнер:
+**Docker:** add a volume to the wiki service and restart the container:
 
 ```yaml
 services:
@@ -86,87 +87,86 @@ services:
       - /opt/wikijs-mcp/wikijs-auth-module:/wiki/server/modules/authentication/mcpdelegation:ro
 ```
 
-(вміст `packages/wikijs-auth-module/` цього репозиторію → у
-`/opt/wikijs-mcp/wikijs-auth-module`; назва директорії призначення мусить
-бути саме `mcpdelegation`)
+(the contents of this repo's `packages/wikijs-auth-module/` go into
+`/opt/wikijs-mcp/wikijs-auth-module`; the destination directory name must be
+exactly `mcpdelegation`)
 
-**Bare metal:** скопіюйте `packages/wikijs-auth-module/` у
-`<wiki>/server/modules/authentication/mcpdelegation/` і перезапустіть Wiki.js.
+**Bare metal:** copy `packages/wikijs-auth-module/` into
+`<wiki>/server/modules/authentication/mcpdelegation/` and restart Wiki.js.
 
-У лозі Wiki.js після налаштування (крок 3) з'явиться:
+After configuration (step 3) the Wiki.js log will show:
 `Authentication Strategy MCP Delegation: [ OK ]`.
 
-## Крок 2. Згенеруйте ключі для assertions
+## Step 2. Generate the assertion keys
 
 ```bash
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out mcp-assertion-key.pem
 openssl pkey -in mcp-assertion-key.pem -pubout -out mcp-assertion-key.pub.pem
 ```
 
-Приватний ключ (`mcp-assertion-key.pem`) — **тільки** на хості MCP-сервера.
-Публічний — у Wiki.js на наступному кроці.
+The private key (`mcp-assertion-key.pem`) stays **only** on the MCP server host.
+The public key goes into Wiki.js in the next step.
 
-## Крок 3. Налаштуйте стратегію у Wiki.js Admin
+## Step 3. Configure the strategy in Wiki.js Admin
 
 Administration → **Auth** → Add Strategy → **MCP Delegation**:
 
-- **Assertion Public Key (PEM)** — вміст `mcp-assertion-key.pub.pem`;
-- **Expected Audience / Issuer** — залиште дефолти
+- **Assertion Public Key (PEM)** — the contents of `mcp-assertion-key.pub.pem`;
+- **Expected Audience / Issuer** — keep the defaults
   (`urn:wikijs:mcp-delegation` / `urn:wikijs-mcp-google-auth`);
-- **User Lookup Provider Priority** — порядок провайдерів для пошуку
-  користувача за email. Якщо ваші люди заходять у wiki через Google/OIDC —
-  поставте той провайдер першим (приймаються і ключі модулів: `google`,
-  `oidc`, `local`);
-- (опційно) **Self-registration** + domain whitelist + auto-enroll групи —
-  щоб нові користувачі Workspace створювались автоматично при першому
-  зверненні через MCP;
+- **User Lookup Provider Priority** — the order of providers to look up the user
+  by email. If your people sign in to the wiki via Google/OIDC, put that
+  provider first (module keys are accepted too: `google`, `oidc`, `local`);
+- (optional) **Self-registration** + domain whitelist + auto-enroll groups — so
+  that new Workspace users are created automatically on their first request
+  through MCP;
 - Save.
 
-Ключ інстансу стратегії видно у списку (для MCP-сервера це
-`WIKIJS_STRATEGY_KEY`; якщо створювали вручну через UI — Wiki.js згенерує
-uuid, скопіюйте його).
+The strategy instance key is shown in the list (this is `WIKIJS_STRATEGY_KEY`
+for the MCP server; if you created it manually via the UI, Wiki.js generates a
+uuid — copy it).
 
-> Акаунти з увімкненим TFA через делегацію працювати не будуть — MCP
-> поверне зрозумілу помилку.
+> Accounts with TFA enabled cannot be used through delegation — the MCP server
+> returns a clear error.
 
-## Крок 4. Створіть Google OAuth client
+## Step 4. Create a Google OAuth client
 
-Google Cloud Console → APIs & Services → Credentials → **Create credentials
-→ OAuth client ID**:
+Google Cloud Console → APIs & Services → Credentials → **Create credentials →
+OAuth client ID**:
 
 - Application type: **Web application**;
 - Authorized redirect URI: `https://mcp.company.com/oauth/google/callback`
-  (ваш `PUBLIC_URL` + `/oauth/google/callback`);
-- OAuth consent screen: тип **Internal** (тільки ваш Workspace).
+  (your `PUBLIC_URL` + `/oauth/google/callback`);
+- OAuth consent screen: type **Internal** (your Workspace only).
 
-Збережіть Client ID і Client Secret.
+Save the Client ID and Client Secret.
 
-## Крок 5. Розгорніть MCP-сервер
+## Step 5. Deploy the MCP server
 
 ```bash
 cd deploy
-cp .env.example .env        # заповніть значення
-mkdir -p keys && cp /шлях/до/mcp-assertion-key.pem keys/
-chmod 644 keys/mcp-assertion-key.pem   # контейнер біжить як non-root node (uid 1000)
+cp .env.example .env        # fill in the values
+mkdir -p keys && cp /path/to/mcp-assertion-key.pem keys/
+chmod 644 keys/mcp-assertion-key.pem   # the container runs as non-root node (uid 1000)
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-> Контейнер працює під non-root користувачем `node` — змонтований файл ключа
-> має бути ним читабельним (`chmod 644`); сам приватний ключ лишається під
-> захистом прав хостової директорії `keys/`.
+> The container runs as the non-root `node` user — the mounted key file must be
+> readable by it (`chmod 644`); the private key itself stays protected by the
+> permissions of the host `keys/` directory.
 
-Змінні `.env`:
+`.env` variables:
 
-| Змінна | Значення |
+| Variable | Value |
 |---|---|
-| `MCP_IMAGE` | Тегований image (release workflow публікує `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` на git-тег, або зберіть локально: `docker build -f packages/mcp-server/Dockerfile -t wikijs-mcp-server:local .`) |
-| `PUBLIC_URL` | Публічний HTTPS URL MCP-сервера |
-| `WIKIJS_URL` | URL вашого Wiki.js (бажано внутрішній) |
-| `WIKIJS_STRATEGY_KEY` | Ключ інстансу стратегії з кроку 3 (`mcpdelegation`, якщо так назвали) |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | З кроку 4 |
-| `GOOGLE_ALLOWED_DOMAIN` | Ваш Workspace-домен, напр. `company.com` — акаунти поза ним відсікаються |
+| `MCP_IMAGE` | Tagged image (the release workflow publishes `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` on a git tag, or build locally: `docker build -f packages/mcp-server/Dockerfile -t wikijs-mcp-server:local .`) |
+| `PUBLIC_URL` | The public HTTPS URL of the MCP server |
+| `WIKIJS_URL` | Your Wiki.js URL (internal preferred) |
+| `WIKIJS_STRATEGY_KEY` | The strategy instance key from step 3 (`mcpdelegation` if you named it so) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | From step 4 |
+| `GOOGLE_ALLOWED_DOMAIN` | Your Workspace domain, e.g. `company.com` — accounts outside it are rejected |
 
-Поставте reverse proxy з TLS перед портом 8000. Мінімальний nginx:
+Put a TLS reverse proxy in front of port 8000. Minimal nginx:
 
 ```nginx
 server {
@@ -183,79 +183,77 @@ server {
 }
 ```
 
-Перевірка: `curl https://mcp.company.com/healthz` → `{"ok":true}`;
+Check: `curl https://mcp.company.com/healthz` → `{"ok":true}`;
 `curl https://mcp.company.com/.well-known/oauth-authorization-server` →
-метадані OAuth.
+OAuth metadata.
 
-## Крок 6. Підключіть клієнтів
+## Step 6. Connect clients
 
 **claude.ai (Team/Enterprise):** Settings → Connectors → **Add custom
-connector** → URL: `https://mcp.company.com/mcp`. При першому використанні
-клієнт пройде OAuth: реєстрація клієнта → Google-логін → готово.
+connector** → URL: `https://mcp.company.com/mcp`. On first use the client runs
+OAuth: client registration → Google login → done.
 
-**Claude Desktop:** Settings → Connectors → Add custom connector з тим самим
-URL (або через `mcp-remote` для старих версій).
+**Claude Desktop:** Settings → Connectors → Add custom connector with the same
+URL (or via `mcp-remote` for older versions).
 
-**MCP Inspector (діагностика):**
+**MCP Inspector (diagnostics):**
 `npx @modelcontextprotocol/inspector` → Transport: Streamable HTTP →
-URL `https://mcp.company.com/mcp` → Open Auth → пройдіть флоу.
+URL `https://mcp.company.com/mcp` → Open Auth → walk through the flow.
 
-## Крок 7. Перевірте
+## Step 7. Verify
 
-У LLM-чаті:
+In the LLM chat:
 
-1. «Хто я у wiki?» → tool `whoami` має показати ваш email, групи і
-   permissions з Wiki.js.
-2. Попросіть знайти/відкрити сторінку, доступну вам → ок.
-3. Попросіть сторінку, до якої у вас немає прав → зрозуміла відмова
-   («Wiki.js denied this operation…»), і вона ж **відсутня** у результатах
-   пошуку/списках.
+1. "Who am I in the wiki?" → the `whoami` tool should show your email, groups
+   and permissions from Wiki.js.
+2. Ask to find/open a page you have access to → OK.
+3. Ask for a page you have no rights to → a clear refusal ("Wiki.js denied this
+   operation…"), and that page is also **absent** from search/listing results.
 
 ---
 
-## Локальна розробка
+## Local development
 
 ```bash
 npm ci
 npm run stand:up      # Wiki.js 2.5.303 + Postgres (docker)
-npm run stand:seed    # фіналізація + групи/користувачі/сторінки + стратегія + dev-ключі
-npm test              # юніт-тести (auth-модуль + OAuth provider)
-npm run build && npm run e2e   # 28 e2e: делегація, OAuth, tools — на живому стенді
+npm run stand:seed    # finalize + groups/users/pages + strategy + dev keys
+npm test              # unit tests (auth module + OAuth provider)
+npm run build && npm run e2e   # in-process e2e: delegation, OAuth, tools — against a live stand
 npm run stand:down
 ```
 
-Тестовий стенд: `admin@example.com/admin1234!`, `john@example.com`
-(Engineering, без доступу до `/management/*`), `kate@example.com`
-(Management). На кожен PR ганяються швидкі перевірки (`CI`: лінт + юніт +
-білд); важкі docker-e2e (`e2e`) і браузерні `ui-e2e` — лише на push у
-`dev`/`main` (тобто перед мержем), щоб не гальмувати ітерації на PR.
+Test stand: `admin@example.com/admin1234!`, `john@example.com` (Engineering, no
+access to `/management/*`), `kate@example.com` (Management). Every PR runs the
+fast checks (`CI`: lint + unit + build); the heavy docker e2e (`e2e`) and
+browser `ui-e2e` run only on pushes to `dev`/`main` (i.e. before merge), so they
+don't slow down PR iterations.
 
-### Браузерні UI e2e (Playwright) під ролями
+### Browser UI e2e (Playwright) under roles
 
-Окремий docker-стек `deploy/docker-compose.e2e.yml` піднімає **емулятор
-Google IdP** (`packages/e2e-ui/idp/` — сторінка логіну з вибором ролі
-замість справжнього Google), Wiki.js, MCP-сервер і **Playwright-раннер**,
-який проганяє весь браузерний OAuth+consent флоу під ролями (John/Kate/
-сторонній домен). Емулятор і Playwright піднімаються **тільки** в цьому
-e2e-стеку — у прод/dev образи не потрапляють.
+A separate docker stack `deploy/docker-compose.e2e.yml` brings up a **fake
+Google IdP emulator** (`packages/e2e-ui/idp/` — a login page with a role picker
+instead of real Google), Wiki.js, the MCP server and a **Playwright runner**
+that drives the whole browser OAuth+consent flow under different roles
+(John/Kate/out-of-domain). The emulator and Playwright come up **only** in this
+e2e stack — they never end up in the prod/dev images.
 
 ```bash
 C=deploy/docker-compose.e2e.yml
 docker compose -f $C build mcp
-docker compose -f $C up -d --wait db wiki idp
+docker compose -f $C up -d db wiki idp   # no --wait on wiki: the seed script is the readiness gate
 docker compose -f $C run --rm seed
 docker compose -f $C up -d --wait mcp
-docker compose -f $C run --rm playwright     # exit code = результат тестів
+docker compose -f $C run --rm playwright     # exit code = test result
 docker compose -f $C down -v
 ```
 
-Перевіряє: логін під роллю → екран згоди називає клієнта → approve →
-whoami і сторінки обмежені правами ролі (John не бачить `management/*`,
-Kate бачить); deny → `access_denied`; акаунт поза Workspace-доменом
-відхиляється ще до згоди. Окремий CI-workflow (`ui-e2e`) робить це на
-push у `dev`/`main`.
+It checks: login as a role → the consent screen names the client → approve →
+whoami and pages scoped to the role (John cannot see `management/*`, Kate can);
+deny → `access_denied`; an out-of-domain account is rejected before consent. A
+separate CI workflow (`ui-e2e`) does this on pushes to `dev`/`main`.
 
-Запуск MCP-сервера проти стенда вручну:
+Running the MCP server against the stand manually:
 
 ```bash
 PUBLIC_URL=http://localhost:8000 \
@@ -265,41 +263,43 @@ GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... GOOGLE_ALLOWED_DOMAIN=example.com 
 npm run dev -w @wikijs-mcp/server
 ```
 
-## Безпека: що варто знати
+## Security notes
 
-- **Assertion**: RS256, TTL 60 с, unique `jti`, захист від replay; приватний
-  ключ лише на MCP-сервері. Компрометація ключа = можливість входу від імені
-  будь-якого користувача wiki — тримайте його як root-секрет і ротуйте
-  (нова пара + оновити публічний ключ у стратегії).
-- **Google-ідентичність**: канонічний ідентифікатор — `iss`+`sub`; email —
-  lookup. `hd`-домен верифікується у підписаному id_token, а не з параметрів.
-- **Confused-deputy захист**: перед видачею authorization code користувач
-  проходить екран згоди per-client (можна вимкнути `requireConsent` лише для
-  довіреного first-party-сценарію). Це не дає атакуючому, що зареєстрував
-  свій OAuth-клієнт через DCR, тихо отримати токен жертви.
-- **Rate limit Wiki.js**: `authentication.login` — 5 викликів/хв з одного
-  IP, а всі делегаційні логіни йдуть з IP MCP-сервера. Брокер кешує JWT
-  (стандартно 30 хв) і чекає-повторює на ліміті, тож у звичайній роботі це
-  непомітно; при масовому onboarding можливі затримки до хвилини.
-- **Ревокація**: стандартний OAuth `/revoke` (за токеном); деактивація
-  користувача у Wiki.js обриває делегацію при найближчому оновленні JWT
-  (≤30 хв); видалення `SESSION_STORE_FILE` + рестарт MCP-сервера скидає всі
-  сесії разом.
-- **Аудит**: кожен виклик tool логується структуровано (хто, який tool,
-  ok/denied) без контенту сторінок.
-- **MCP endpoint**: bearer-only, 120 запитів/хв на токен, security headers,
-  OAuth-ендпоінти захищені вбудованим rate limiting SDK.
+- **Assertion**: RS256, TTL 60 s, unique `jti`, replay protection; the private
+  key lives only on the MCP server. A compromised key means the ability to sign
+  in as any wiki user — treat it as a root secret and rotate it (new pair +
+  update the public key in the strategy).
+- **Google identity**: the canonical identifier is `iss`+`sub`; email is a
+  lookup. The `hd` domain is verified from the signed id_token, not from
+  parameters.
+- **Confused-deputy defense**: before an authorization code is released the user
+  goes through a per-client consent screen (can be disabled via `requireConsent`
+  only for a trusted first-party scenario). This prevents an attacker who
+  registered their own OAuth client via DCR from silently obtaining the victim's
+  token.
+- **Wiki.js rate limit**: `authentication.login` is 5 calls/min per IP, and all
+  delegation logins come from the MCP server's IP. The broker caches JWTs (30
+  min by default) and waits-and-retries on the limit, so it is invisible in
+  normal operation; during mass onboarding delays of up to a minute are
+  possible.
+- **Revocation**: standard OAuth `/revoke` (per token); deactivating a user in
+  Wiki.js breaks delegation at the next JWT refresh (≤30 min); deleting
+  `SESSION_STORE_FILE` + restarting the MCP server drops all sessions at once.
+- **Audit**: every tool call is logged in a structured form (who, which tool,
+  ok/denied) without page content.
+- **MCP endpoint**: bearer-only, 120 requests/min per token, security headers;
+  the OAuth endpoints are protected by the SDK's built-in rate limiting.
 
-## Обмеження та плани
+## Limitations and plans
 
-- RAG/semantic search — **окремий майбутній сервіс**. Точка підключення
-  готова: `search_wiki` працює через інтерфейс `SearchBackend`
-  (`src/search/` — v1 = нативний пошук Wiki.js; RAG-сервіс отримає Wiki.js
-  JWT користувача і збереже ACL-модель). Див. `docs/rag-integration.md`.
-- Один інстанс MCP-сервера (FileStore + in-memory replay-кеш). Для HA
-  потрібен спільний стор (Redis) — інтерфейс `KVStore` вже виділений.
-- Wiki.js 3.x має інший auth-механізм — модуль розрахований на 2.5.x.
+- RAG/semantic search is a **separate future service**. The plug point is ready:
+  `search_wiki` works through the `SearchBackend` interface (`src/search/` — v1
+  = native Wiki.js search; the RAG service will receive the user's Wiki.js JWT
+  and preserve the ACL model). See `docs/rag-integration.md`.
+- Single MCP server instance (FileStore + in-memory replay cache). HA needs a
+  shared store (Redis) — the `KVStore` interface is already extracted.
+- Wiki.js 3.x has a different auth mechanism — the module targets 2.5.x.
 
-## Ліцензія
+## License
 
 Apache-2.0
