@@ -16,7 +16,7 @@
     "test": "npm run test --workspaces --if-present",
     "stand:up": "docker compose -f deploy/docker-compose.dev.yml up -d db wiki",
     "stand:down": "docker compose -f deploy/docker-compose.dev.yml down -v",
-    "stand:seed": "node deploy/seed/seed.mjs",
+    "stand:seed": "node deploy/seed/run.mjs",
     "e2e": "npm run e2e -w @wikijs-mcp/server"
   }
 }

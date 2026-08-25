@@ -30,9 +30,11 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Start Wiki.js dev stand
-        run: docker compose -f deploy/docker-compose.dev.yml up -d db wiki
+        run: docker compose -f deploy/docker-compose.dev.yml up -d --wait db wiki
       - name: Seed fixture ACL
-        run: node deploy/seed/seed.mjs
+        run: node deploy/seed/run.mjs
+      - name: Verify seed produced the assertion key
+        run: test -f deploy/keys/mcp-assertion-key.pem
       - name: Run e2e tests
         run: npm run e2e
       - name: Teardown

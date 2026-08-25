@@ -84,7 +84,7 @@ services:
     environment:
       WIKI_URL: http://wiki:3000
       MCP_KEYS_DIR: /keys
-    command: sh -c "node deploy/seed/seed.mjs && chmod 644 /keys/mcp-assertion-key.pem"
+    command: sh -c "node deploy/seed/run.mjs && chmod 644 /keys/mcp-assertion-key.pem"
     volumes:
       - ..:/app
       - keys:/keys

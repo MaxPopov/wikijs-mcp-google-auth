@@ -374,10 +374,6 @@ export async function seed () {
   return { adminJwt, groupIds, keys }
 }
 
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())
-if (isMain) {
-  seed().catch(err => {
-    console.error(err.message)
-    process.exit(1)
-  })
-}
+// This file is a library — run the seed via deploy/seed/run.mjs, which
+// invokes seed() explicitly. (A previous "is this the main module?" guard
+// here proved fragile on CI and silently skipped seeding.)
