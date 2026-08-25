@@ -30,6 +30,9 @@ services:
       SESSION_STORE_FILE: /data/sessions.json
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
+      # The container runs as the non-root `node` user (uid 1000), so this
+      # key file must be readable by it, e.g.:  chmod 644 keys/mcp-assertion-key.pem
+      # (the private key stays protected by the host directory's permissions).
       - ./keys/mcp-assertion-key.pem:/run/secrets/mcp-assertion-key:ro
       - mcp-data:/data
     ports:

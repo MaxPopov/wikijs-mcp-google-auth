@@ -146,3 +146,6 @@ vite.config.ts.timestamp-*
 *.pem
 deploy/keys/
 deploy/.state/
+
+# Local CCR proxy CA (sandbox build validation only, never committed)
+.ccr-ca.crt

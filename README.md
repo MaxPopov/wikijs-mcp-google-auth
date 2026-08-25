@@ -147,8 +147,13 @@ Google Cloud Console → APIs & Services → Credentials → **Create credential
 cd deploy
 cp .env.example .env        # заповніть значення
 mkdir -p keys && cp /шлях/до/mcp-assertion-key.pem keys/
+chmod 644 keys/mcp-assertion-key.pem   # контейнер біжить як non-root node (uid 1000)
 docker compose -f docker-compose.prod.yml up -d
 ```
+
+> Контейнер працює під non-root користувачем `node` — змонтований файл ключа
+> має бути ним читабельним (`chmod 644`); сам приватний ключ лишається під
+> захистом прав хостової директорії `keys/`.
 
 Змінні `.env`:
 
