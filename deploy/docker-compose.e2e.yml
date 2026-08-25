@@ -11,16 +11,16 @@
 #   docker compose -f $C run --rm playwright     # exit code = test result
 #   docker compose -f $C down -v
 #
-# Host networking is used so the browser and every server share one
-# address space (localhost:PORT), which sidesteps OAuth redirect
-# host-mismatch problems. Linux-only (matches CI runners).
+# Everything runs on one bridge network and addresses peers by SERVICE
+# NAME (mcp:8000, idp:9000, wiki:3000). The Playwright browser runs inside
+# the playwright container on that same network, so it resolves the same
+# names the servers issue in OAuth redirects — no host-networking needed.
 
 name: wikijs-mcp-e2e
 
 services:
   db:
     image: postgres:15-alpine
-    network_mode: host
     environment:
       POSTGRES_DB: wiki
       POSTGRES_USER: wikijs
@@ -33,13 +33,12 @@ services:
 
   wiki:
     image: ghcr.io/requarks/wiki:2.5.303
-    network_mode: host
     depends_on:
       db:
         condition: service_healthy
     environment:
       DB_TYPE: postgres
-      DB_HOST: localhost
+      DB_HOST: db
       DB_PORT: 5432
       DB_USER: wikijs
       DB_PASS: wikijsrocks
@@ -51,15 +50,19 @@ services:
       interval: 5s
       timeout: 5s
       retries: 60
+      start_period: 30s
 
   idp:
     image: node:22-alpine
-    network_mode: host
     working_dir: /app
     command: node packages/e2e-ui/idp/server.mjs
+    depends_on:
+      # jose/express resolve from the bind-mounted root node_modules.
+      db:
+        condition: service_started
     environment:
       PORT: 9000
-      ISSUER: http://localhost:9000
+      ISSUER: http://idp:9000
       CLIENT_ID: fake-google-client
       CLIENT_SECRET: fake-google-secret
     volumes:
@@ -74,13 +77,12 @@ services:
   # keypair into the shared volume, and register the delegation strategy.
   seed:
     image: node:22-alpine
-    network_mode: host
     working_dir: /app
     depends_on:
       wiki:
         condition: service_healthy
     environment:
-      WIKI_URL: http://localhost:3000
+      WIKI_URL: http://wiki:3000
       MCP_KEYS_DIR: /keys
     command: sh -c "node deploy/seed/seed.mjs && chmod 644 /keys/mcp-assertion-key.pem"
     volumes:
@@ -93,7 +95,6 @@ services:
     build:
       context: ..
       dockerfile: packages/mcp-server/Dockerfile
-    network_mode: host
     depends_on:
       seed:
         condition: service_completed_successfully
@@ -101,30 +102,33 @@ services:
         condition: service_healthy
     environment:
       PORT: 8000
-      PUBLIC_URL: http://localhost:8000
-      WIKIJS_URL: http://localhost:3000
+      PUBLIC_URL: http://mcp:8000
+      # Plain HTTP over a docker service name in the e2e network — the MCP
+      # SDK otherwise requires an HTTPS (or localhost) issuer. TEST ONLY;
+      # production runs behind HTTPS and never sets this.
+      MCP_DANGEROUSLY_ALLOW_INSECURE_ISSUER_URL: '1'
+      WIKIJS_URL: http://wiki:3000
       WIKIJS_STRATEGY_KEY: mcpdelegation
       MCP_ASSERTION_PRIVATE_KEY_FILE: /keys/mcp-assertion-key.pem
       GOOGLE_CLIENT_ID: fake-google-client
       GOOGLE_CLIENT_SECRET: fake-google-secret
       GOOGLE_ALLOWED_DOMAIN: example.com
-      GOOGLE_AUTHORIZATION_ENDPOINT: http://localhost:9000/authorize
-      GOOGLE_TOKEN_ENDPOINT: http://localhost:9000/token
-      GOOGLE_JWKS_URI: http://localhost:9000/jwks
-      GOOGLE_ISSUER: http://localhost:9000
+      GOOGLE_AUTHORIZATION_ENDPOINT: http://idp:9000/authorize
+      GOOGLE_TOKEN_ENDPOINT: http://idp:9000/token
+      GOOGLE_JWKS_URI: http://idp:9000/jwks
+      GOOGLE_ISSUER: http://idp:9000
     volumes:
       - keys:/keys:ro
 
   playwright:
     image: mcr.microsoft.com/playwright:v1.56.1-noble
-    network_mode: host
     working_dir: /app/packages/e2e-ui
     depends_on:
       mcp:
         condition: service_healthy
     environment:
-      MCP_URL: http://localhost:8000
-      IDP_URL: http://localhost:9000
+      MCP_URL: http://mcp:8000
+      IDP_URL: http://idp:9000
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
       CI: '1'
     command: sh -c "npx playwright test"
