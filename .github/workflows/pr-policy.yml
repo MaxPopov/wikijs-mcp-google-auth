@@ -1,0 +1,38 @@
+name: PR policy
+
+# Rulesets не вміють обмежувати гілку-джерело PR і не перевіряють опис.
+# Цей workflow робить саме це, а ruleset "main - release only" робить
+# перевірку "pr-policy" обов'язковою для merge у main.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: pr-policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate source branch, version and description
+        env:
+          # Все, що приходить з PR, передаємо через env, а не через ${{ }} у shell.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          ALLOWED_SOURCE: dev
+        run: python3 .github/scripts/check_release_pr.py

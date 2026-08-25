@@ -1,0 +1,51 @@
+name: Release
+
+# Після merge PR у main створює тег vX.Y.Z і GitHub Release
+# з описом, узятим із тіла PR.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    if: github.event.pull_request.merged == true
+    name: tag-and-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Extract version from PR body
+        id: version
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 .github/scripts/extract_version.py
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TARGET_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            echo "Тег ${VERSION} вже існує — пропускаю."
+            exit 0
+          fi
+          printf '%s\n' "$PR_BODY" > notes.md
+          printf '\n---\nMerged via #%s\n' "$PR_NUMBER" >> notes.md
+          gh release create "$VERSION" \
+            --target "$TARGET_SHA" \
+            --title "$VERSION" \
+            --notes-file notes.md
