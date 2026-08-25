@@ -159,7 +159,7 @@ docker compose -f docker-compose.prod.yml up -d
 
 | Variable | Value |
 |---|---|
-| `MCP_IMAGE` | Tagged image (the release workflow publishes `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` on a git tag, or build locally: `docker build -f packages/mcp-server/Dockerfile -t wikijs-mcp-server:local .`) |
+| `MCP_IMAGE` | Tagged image (the `Release on main` workflow auto-publishes `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` when a version bump is merged to `main`, or build locally: `docker build -f packages/mcp-server/Dockerfile -t wikijs-mcp-server:local .`) |
 | `PUBLIC_URL` | The public HTTPS URL of the MCP server |
 | `WIKIJS_URL` | Your Wiki.js URL (internal preferred) |
 | `WIKIJS_STRATEGY_KEY` | The strategy instance key from step 3 (`mcpdelegation` if you named it so) |
@@ -262,6 +262,20 @@ MCP_ASSERTION_PRIVATE_KEY_FILE=deploy/keys/mcp-assertion-key.pem \
 GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... GOOGLE_ALLOWED_DOMAIN=example.com \
 npm run dev -w @wikijs-mcp/server
 ```
+
+## Releases
+
+Releases are automatic. Bump `version` in the root `package.json` on `dev`,
+open a `dev` → `main` PR, and merge it. The `Release on main` workflow then,
+on the push to `main`, builds and pushes
+`ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` (+ `:latest`) and creates the git
+tag `vX.Y.Z` and a GitHub Release — all in one run, using only the built-in
+`GITHUB_TOKEN` (no PAT/secret to configure). If the version is unchanged the
+run is a no-op, so ordinary merges to `main` don't create releases.
+
+> One-time repo settings for this to work: Settings → Actions → General →
+> Workflow permissions = **Read and write permissions**; and if you protect
+> tags with a ruleset, allow GitHub Actions to create `v*` tags.
 
 ## Security notes
 
