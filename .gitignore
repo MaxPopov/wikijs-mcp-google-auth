@@ -149,3 +149,8 @@ deploy/.state/
 
 # Local CCR proxy CA (sandbox build validation only, never committed)
 .ccr-ca.crt
+
+# Playwright UI e2e artifacts
+packages/e2e-ui/playwright-report/
+packages/e2e-ui/test-results/
+packages/e2e-ui/blob-report/

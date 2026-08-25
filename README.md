@@ -228,6 +228,31 @@ npm run stand:down
 (Engineering, без доступу до `/management/*`), `kate@example.com`
 (Management). CI ганяє юніт + повний e2e на кожен push/PR у `dev`/`main`.
 
+### Браузерні UI e2e (Playwright) під ролями
+
+Окремий docker-стек `deploy/docker-compose.e2e.yml` піднімає **емулятор
+Google IdP** (`packages/e2e-ui/idp/` — сторінка логіну з вибором ролі
+замість справжнього Google), Wiki.js, MCP-сервер і **Playwright-раннер**,
+який проганяє весь браузерний OAuth+consent флоу під ролями (John/Kate/
+сторонній домен). Емулятор і Playwright піднімаються **тільки** в цьому
+e2e-стеку — у прод/dev образи не потрапляють.
+
+```bash
+C=deploy/docker-compose.e2e.yml
+docker compose -f $C build mcp
+docker compose -f $C up -d --wait db wiki idp
+docker compose -f $C run --rm seed
+docker compose -f $C up -d --wait mcp
+docker compose -f $C run --rm playwright     # exit code = результат тестів
+docker compose -f $C down -v
+```
+
+Перевіряє: логін під роллю → екран згоди називає клієнта → approve →
+whoami і сторінки обмежені правами ролі (John не бачить `management/*`,
+Kate бачить); deny → `access_denied`; акаунт поза Workspace-доменом
+відхиляється ще до згоди. Окремий CI-workflow (`ui-e2e`) робить це на
+кожен push/PR.
+
 Запуск MCP-сервера проти стенда вручну:
 
 ```bash
