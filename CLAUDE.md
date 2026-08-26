@@ -52,7 +52,8 @@ workflows split the job:
 - `.github/workflows/release-on-main.yml` (`Release on main`) — runs on every
   push to `main`. Builds the image and pushes it to GHCR under the version in
   `package.json`, skipping itself if that image tag is already published. It
-  does nothing else: no tag, no Release, no version logic.
+  holds no version logic; it only carries a safety net — if that version has
+  no tag yet, it creates the tag + Release after publishing the image.
 
 Neither needs a PAT or any secret — both use the built-in `GITHUB_TOKEN`.
 
@@ -83,6 +84,12 @@ to `extra-files` in the same PR**, or it will silently go stale.
   created when the release PR merges into `dev`; the image is only built when
   `dev` reaches `main`. Between the two, `docker pull` for that version 404s.
   Do the `dev` → `main` merge promptly after a release PR.
+- **A hand-set version still releases.** If `package.json` carries a version
+  release-please never tagged — someone edited it, or it predates adopting
+  release-please — `Release on main` creates the tag and Release itself, after
+  the image. Without that, such a version would ship an image and nothing else.
+  This is a safety net, not a second way to release: it writes no CHANGELOG
+  entry, so the normal path stays the release PR on `dev`.
 - **The tag does not trigger the image build.** A tag created with
   `GITHUB_TOKEN` does not trigger other workflows (GitHub blocks recursive
   triggers), which is exactly why the build hangs off the push to `main`.
@@ -104,13 +111,19 @@ to `extra-files` in the same PR**, or it will silently go stale.
   make the package **Public** once in its GHCR package settings. Otherwise
   consumers `docker login ghcr.io` first.
 
-### If a release run never starts
-Both release workflows also accept a manual **Run workflow** from the Actions
-tab (`workflow_dispatch`). That matters because a push-triggered run that is
-never created — Actions disabled, quota exhausted, an outage — is not retried
-when the service comes back, and the triggering push cannot be replayed. Merge
-a `dev` → `main` PR while Actions is down and the release simply does not
-happen; dispatch `Release on main` by hand once it is back.
+### If a run never starts
+**Every** workflow here accepts a manual **Run workflow** from the Actions tab
+(`workflow_dispatch`). That matters because a push-triggered run that is never
+created — Actions disabled, quota exhausted, an outage — is not retried when
+the service comes back, and the triggering push cannot be replayed. Merge a
+`dev` → `main` PR while Actions is down and the release simply does not
+happen; merge to `dev` and you get no CI verdict on that head at all. Once
+Actions is back, dispatch the workflow by hand against the branch instead of
+pushing a dummy commit to bait a trigger.
+
+Distinguish this from a run that starts and fails: check the run list. If no
+run was *created* for a push, it is this problem, not a broken workflow — the
+workflows will still show as `active`.
 
 ### If a release run fails
 Diagnose from the run logs before touching repo settings — the failure is

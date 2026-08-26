@@ -3,6 +3,7 @@ name: UI e2e
 on:
   push:
     branches: [main, dev]
+  workflow_dispatch:
 
 # Browser UI end-to-end: the fake Google IdP emulator + Wiki.js + MCP
 # server + a Playwright runner, all in docker, exercising the OAuth +
