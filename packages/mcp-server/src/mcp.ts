@@ -53,7 +53,7 @@ export function identityFromAuthInfo (authInfo: AuthInfo | undefined): Delegated
 export function buildMcpServer (deps: McpDeps): McpServer {
   const server = new McpServer({
     name: 'wikijs-mcp',
-    version: '0.2.0'
+    version: '0.2.0' // x-release-please-version
   })
 
   server.registerTool('whoami', {

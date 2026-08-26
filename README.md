@@ -190,7 +190,7 @@ docker compose -f docker-compose.prod.yml up -d
 
 | Variable | Value |
 |---|---|
-| `MCP_IMAGE` | Tagged image (the `Release on main` workflow auto-publishes `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` when a version bump is merged to `main`, or build locally: `docker build -f packages/mcp-server/Dockerfile -t wikijs-mcp-server:local .`) |
+| `MCP_IMAGE` | Tagged image (the `Release on main` workflow auto-publishes `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` on every merge to `main`, or build locally: `docker build -f packages/mcp-server/Dockerfile -t wikijs-mcp-server:local .`) |
 | `PUBLIC_URL` | The public HTTPS URL of the MCP server |
 | `WIKIJS_URL` | Your Wiki.js URL (internal preferred) |
 | `WIKIJS_STRATEGY_KEY` | The strategy instance key from step 3 (`mcpdelegation` if you named it so) |
@@ -296,13 +296,22 @@ npm run dev -w @wikijs-mcp/server
 
 ## Releases
 
-Releases are automatic. Bump `version` in the root `package.json` on `dev`,
-open a `dev` → `main` PR, and merge it. The `Release on main` workflow then,
-on the push to `main`, builds and pushes
-`ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` (+ `:latest`) and creates the git
-tag `vX.Y.Z` and a GitHub Release — all in one run, using only the built-in
-`GITHUB_TOKEN` (no PAT/secret to configure). If the version is unchanged the
-run is a no-op, so ordinary merges to `main` don't create releases.
+Releases are automatic and the version is never edited by hand — it is
+computed from [Conventional Commits](https://www.conventionalcommits.org)
+(`fix:` → patch, `feat:` → minor, `!` or a `BREAKING CHANGE:` footer → major).
+
+1. Land work on `dev` via PRs, with Conventional Commit messages.
+2. `Release please` keeps a **`chore(dev): release X.Y.Z`** PR open against
+   `dev`. Merging it bumps the version everywhere, writes `CHANGELOG.md`, and
+   creates the git tag `vX.Y.Z` and a GitHub Release.
+3. Open a `dev` → `main` PR and merge it. `Release on main` builds and pushes
+   `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` (+ `:latest`).
+
+Both workflows use only the built-in `GITHUB_TOKEN` — no PAT or secret to
+configure. If no release PR appears, the commits since the last release are
+all `chore:`/`docs:`-class or carry no prefix; that is the tooling working as
+designed. Which files carry the version is declared in
+`release-please-config.json` — add any new one to its `extra-files`.
 
 > One-time repo settings for this to work: Settings → Actions → General →
 > Workflow permissions = **Read and write permissions**; and if you protect
