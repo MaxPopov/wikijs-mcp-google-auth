@@ -104,6 +104,14 @@ to `extra-files` in the same PR**, or it will silently go stale.
   make the package **Public** once in its GHCR package settings. Otherwise
   consumers `docker login ghcr.io` first.
 
+### If a release run never starts
+Both release workflows also accept a manual **Run workflow** from the Actions
+tab (`workflow_dispatch`). That matters because a push-triggered run that is
+never created — Actions disabled, quota exhausted, an outage — is not retried
+when the service comes back, and the triggering push cannot be replayed. Merge
+a `dev` → `main` PR while Actions is down and the release simply does not
+happen; dispatch `Release on main` by hand once it is back.
+
 ### If a release run fails
 Diagnose from the run logs before touching repo settings — the failure is
 usually in the workflow/build, not permissions (e.g. the v0.1.0 casing bug

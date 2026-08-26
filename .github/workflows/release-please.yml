@@ -13,6 +13,7 @@ name: Release please
 on:
   push:
     branches: [dev]
+  workflow_dispatch:
 
 concurrency:
   group: release-please
