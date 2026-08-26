@@ -111,13 +111,19 @@ to `extra-files` in the same PR**, or it will silently go stale.
   make the package **Public** once in its GHCR package settings. Otherwise
   consumers `docker login ghcr.io` first.
 
-### If a release run never starts
-Both release workflows also accept a manual **Run workflow** from the Actions
-tab (`workflow_dispatch`). That matters because a push-triggered run that is
-never created — Actions disabled, quota exhausted, an outage — is not retried
-when the service comes back, and the triggering push cannot be replayed. Merge
-a `dev` → `main` PR while Actions is down and the release simply does not
-happen; dispatch `Release on main` by hand once it is back.
+### If a run never starts
+**Every** workflow here accepts a manual **Run workflow** from the Actions tab
+(`workflow_dispatch`). That matters because a push-triggered run that is never
+created — Actions disabled, quota exhausted, an outage — is not retried when
+the service comes back, and the triggering push cannot be replayed. Merge a
+`dev` → `main` PR while Actions is down and the release simply does not
+happen; merge to `dev` and you get no CI verdict on that head at all. Once
+Actions is back, dispatch the workflow by hand against the branch instead of
+pushing a dummy commit to bait a trigger.
+
+Distinguish this from a run that starts and fails: check the run list. If no
+run was *created* for a push, it is this problem, not a broken workflow — the
+workflows will still show as `active`.
 
 ### If a release run fails
 Diagnose from the run logs before touching repo settings — the failure is
