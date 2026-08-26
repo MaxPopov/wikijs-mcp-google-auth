@@ -60,12 +60,43 @@ Google Workspace ──OAuth/OIDC──▶ MCP Server ──signed assertion─�
 | Tool | Description |
 |---|---|
 | `whoami` | The user's identity + their Wiki.js groups and permissions (access diagnostics) |
-| `search_wiki` | Full-text search; results are filtered by the user's permissions |
-| `get_page` | A page by id or path (metadata + full markdown) |
+| `search_wiki` | Full-text search; results are filtered by the user's permissions and addressed by `path` + `locale` (no page id — see below) |
+| `get_page` | A page by path (preferred) or id (metadata + full markdown) |
 | `list_pages` | Pages visible to the user (filter by path prefix) |
 | `create_page` | Create a page (markdown) |
 | `update_page` | Update: read-merge-write, unspecified fields are preserved |
-| `delete_page` | Delete (destructive, Wiki.js enforces `delete:pages`) |
+| `delete_page` | Delete by path or id (destructive, Wiki.js enforces `delete:pages`); passing both cross-checks them |
+
+### Addressing a page: prefer `path`
+
+`get_page`, `update_page` and `delete_page` accept a numeric `id`, but an id is
+only trustworthy when it came from `list_pages`, `create_page`, or an earlier
+`get_page`.
+
+**`search_wiki` deliberately returns no id.** Wiki.js fills the `id` of a search
+hit from the *active search index*, not from the `pages` table: only the `db`
+engine happens to index the real `pages.id` — the `postgres` engine returns the
+`pagesVector` row id (its own sequence) and elasticsearch/algolia/solr return
+`page.hash`. Passing such a value to `get_page(id:)` addresses **an unrelated
+page**, which surfaces either as a bogus "you do not have permission" or —
+worse — as the wrong page's content returned under the title you searched for.
+The tool therefore drops it rather than tempting a caller into using it.
+
+### Why a denial by `id` next to a success by `path` is not an ACL bug
+
+`pages.single(id)` and `pages.singleByPath(path, locale)` load the row through
+the same `getPageFromDb` and then run the **identical** check —
+`checkAccess(user, ['manage:pages', 'delete:pages'], { path, locale })` (Wiki.js
+2.5.296+, where `singleByPath` was added). There is no admin-only resolver and
+no second permission cache on the id side. If the two disagree, they are looking
+at **different pages**.
+
+Note the permission list: reading page *source* through the API needs
+`manage:pages` or `delete:pages` on that path. `read:pages` alone is enough to
+open the page in the wiki UI and to see it in `list_pages` / `search_wiki`, but
+not to fetch it here — so a reader-only user gets a denial from `get_page` by id
+*and* by path. The tool errors say which of the two traps applies instead of
+reporting a bare "no permission".
 
 ---
 
@@ -159,7 +190,7 @@ docker compose -f docker-compose.prod.yml up -d
 
 | Variable | Value |
 |---|---|
-| `MCP_IMAGE` | Tagged image (the `Release on main` workflow auto-publishes `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` when a version bump is merged to `main`, or build locally: `docker build -f packages/mcp-server/Dockerfile -t wikijs-mcp-server:local .`) |
+| `MCP_IMAGE` | Tagged image (the `Release on main` workflow auto-publishes `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` on every merge to `main`, or build locally: `docker build -f packages/mcp-server/Dockerfile -t wikijs-mcp-server:local .`) |
 | `PUBLIC_URL` | The public HTTPS URL of the MCP server |
 | `WIKIJS_URL` | Your Wiki.js URL (internal preferred) |
 | `WIKIJS_STRATEGY_KEY` | The strategy instance key from step 3 (`mcpdelegation` if you named it so) |
@@ -265,13 +296,22 @@ npm run dev -w @wikijs-mcp/server
 
 ## Releases
 
-Releases are automatic. Bump `version` in the root `package.json` on `dev`,
-open a `dev` → `main` PR, and merge it. The `Release on main` workflow then,
-on the push to `main`, builds and pushes
-`ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` (+ `:latest`) and creates the git
-tag `vX.Y.Z` and a GitHub Release — all in one run, using only the built-in
-`GITHUB_TOKEN` (no PAT/secret to configure). If the version is unchanged the
-run is a no-op, so ordinary merges to `main` don't create releases.
+Releases are automatic and the version is never edited by hand — it is
+computed from [Conventional Commits](https://www.conventionalcommits.org)
+(`fix:` → patch, `feat:` → minor, `!` or a `BREAKING CHANGE:` footer → major).
+
+1. Land work on `dev` via PRs, with Conventional Commit messages.
+2. `Release please` keeps a **`chore(dev): release X.Y.Z`** PR open against
+   `dev`. Merging it bumps the version everywhere, writes `CHANGELOG.md`, and
+   creates the git tag `vX.Y.Z` and a GitHub Release.
+3. Open a `dev` → `main` PR and merge it. `Release on main` builds and pushes
+   `ghcr.io/<owner>/wikijs-mcp-server:vX.Y.Z` (+ `:latest`).
+
+Both workflows use only the built-in `GITHUB_TOKEN` — no PAT or secret to
+configure. If no release PR appears, the commits since the last release are
+all `chore:`/`docs:`-class or carry no prefix; that is the tooling working as
+designed. Which files carry the version is declared in
+`release-please-config.json` — add any new one to its `extra-files`.
 
 > One-time repo settings for this to work: Settings → Actions → General →
 > Workflow permissions = **Read and write permissions**; and if you protect

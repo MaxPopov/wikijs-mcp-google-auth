@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "node",
+  "bootstrap-sha": "5d5340f1238ba16e42d04eac3f7dad8039e60b80",
+  "packages": {
+    ".": {
+      "package-name": "wikijs-mcp-google-auth",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        { "type": "json", "path": "packages/mcp-server/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/wikijs-auth-module/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/e2e-ui/package.json", "jsonpath": "$.version" },
+        { "type": "generic", "path": "packages/mcp-server/src/index.ts" },
+        { "type": "generic", "path": "packages/mcp-server/src/mcp.ts" }
+      ]
+    }
+  }
+}

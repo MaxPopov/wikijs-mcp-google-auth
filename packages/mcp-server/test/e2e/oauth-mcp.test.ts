@@ -19,7 +19,12 @@ async function mcpClient (harness: TestHarness, accessToken: string): Promise<Cl
 }
 
 async function callWhoami (client: Client): Promise<{ identity: { email: string }, wikijs: { groups?: Array<string | number>, permissions?: string[] } }> {
-  const res = await client.callTool({ name: 'whoami', arguments: {} })
+  // Generous timeout, matching tools.test.ts: whoami is the first call to
+  // touch Wiki.js for this identity, so the server may still be waiting out
+  // the Wiki.js login rate limit (5/min per source IP — every delegation
+  // login in the suite comes from one IP) before it can mint the delegated
+  // JWT. The SDK's 60s default expires mid-wait.
+  const res = await client.callTool({ name: 'whoami', arguments: {} }, undefined, { timeout: 180_000 })
   const text = (res.content as Array<{ type: string, text: string }>)[0]!.text
   return JSON.parse(text)
 }
