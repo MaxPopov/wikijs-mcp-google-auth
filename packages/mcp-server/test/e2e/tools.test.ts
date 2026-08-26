@@ -119,6 +119,58 @@ describe('MCP tools ACL matrix (live Wiki.js)', () => {
     expect(gone.isError).toBe(true)
   })
 
+  it('search hits are addressed by path, never by a search-index id', async () => {
+    const res = await call(john, 'search_wiki', { query: 'onboarding' })
+    expect(res.isError).toBe(false)
+    const hits = res.json().results as Array<Record<string, unknown>>
+    expect(hits.length).toBeGreaterThan(0)
+    // The Wiki.js search index does not carry pages.id on every engine, so
+    // the tool must not offer one — get_page(id:) on it would address an
+    // unrelated page.
+    for (const hit of hits) {
+      expect(hit).not.toHaveProperty('id')
+      expect(hit).not.toHaveProperty('ref')
+      expect(typeof hit.path).toBe('string')
+    }
+    const hit = hits.find(h => h.path === 'engineering/onboarding')
+    expect(hit).toBeDefined()
+    const page = await call(john, 'get_page', { path: hit?.path, locale: hit?.locale })
+    expect(page.isError).toBe(false)
+    expect(page.json().path).toBe('engineering/onboarding')
+  })
+
+  it('delete_page refuses when id and path name different pages', async () => {
+    const path = `engineering/e2e-delete-guard-${Date.now()}`
+    const created = await call(john, 'create_page', { path, title: 'Delete guard', content: '# guard' })
+    expect(created.isError).toBe(false)
+    const id = created.json().id as number
+
+    // A wrong id paired with the intended path must not destroy either page.
+    const mismatch = await call(john, 'delete_page', { id, path: 'engineering/onboarding' })
+    expect(mismatch.isError).toBe(true)
+    expect(mismatch.text).toContain(path)
+
+    const survivor = await call(john, 'get_page', { path: 'engineering/onboarding' })
+    expect(survivor.isError).toBe(false)
+
+    const deleted = await call(john, 'delete_page', { path })
+    expect(deleted.isError).toBe(false)
+    expect(deleted.json().id).toBe(id)
+  })
+
+  it('a denial by id points at id provenance before permissions', async () => {
+    const kateView = await call(kate, 'get_page', { path: 'management/salaries' })
+    const salariesId = kateView.json().id as number
+
+    const byId = await call(john, 'get_page', { id: salariesId })
+    expect(byId.isError).toBe(true)
+    expect(byId.text).toMatch(/retry by path/i)
+
+    const byPath = await call(john, 'get_page', { path: 'management/salaries' })
+    expect(byPath.isError).toBe(true)
+    expect(byPath.text).not.toMatch(/retry by path/i)
+  })
+
   it('john cannot create a page under management/', async () => {
     const res = await call(john, 'create_page', {
       path: `management/e2e-intrusion-${Date.now()}`, title: 'Nope', content: 'nope'

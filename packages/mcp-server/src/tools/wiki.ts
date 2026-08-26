@@ -85,16 +85,89 @@ function renderPage (page: PageFull): Record<string, unknown> {
   }
 }
 
-async function fetchPage (deps: McpDeps, jwt: string, args: { id?: number, path?: string, locale: string }): Promise<PageFull | null> {
-  if (args.id !== undefined) {
-    const data = await deps.wikiClient.graphql<{ pages: { single: PageFull | null } }>(
-      `query ($id: Int!) { pages { single(id: $id) { ${PAGE_FIELDS} } } }`, { id: args.id }, jwt)
-    return data.pages.single
+/**
+ * Why a denial by id and a success by path are NOT an ACL inconsistency.
+ *
+ * `pages.single(id)` and `pages.singleByPath(path, locale)` load the row
+ * through the same `getPageFromDb` and then run the SAME check —
+ * `checkAccess(user, ['manage:pages', 'delete:pages'], { path, locale })`
+ * (Wiki.js 2.5.296+, where `singleByPath` was introduced). There is no
+ * admin-only resolver and no second rights cache on the id side.
+ *
+ * When the two disagree they are simply looking at DIFFERENT PAGES: the
+ * `id` did not belong to the page the caller meant. The usual source of
+ * such an id is a search hit — see `SearchResultItem.ref`.
+ *
+ * The second trap is that BOTH resolvers demand `manage:pages` or
+ * `delete:pages`, while `list_pages` / `search_wiki` are filtered with
+ * `read:pages`. A reader-only user therefore sees a page listed and is
+ * refused its source here — by id and by path alike. Both messages below
+ * say so instead of reporting a bare "no permission".
+ */
+const ID_PROVENANCE_HINT =
+  'Ids are only valid if they came from list_pages, create_page, or a previous get_page. ' +
+  'The "ref" in a search_wiki hit is a search-index reference, not a page id — ' +
+  'address search hits by their path + locale instead.'
+
+const SOURCE_PERMISSION_HINT =
+  'Reading page source over the API needs "manage:pages" or "delete:pages" on that path; ' +
+  '"read:pages" alone shows the page in the wiki UI, list_pages and search_wiki but is not enough here.'
+
+function isForbidden (message: string): boolean {
+  return /not authorized|forbidden/i.test(message)
+}
+
+function isMissing (message: string): boolean {
+  return /does not exist|not found/i.test(message)
+}
+
+type PageLookup = { page: PageFull } | { error: ToolResult }
+
+/**
+ * Resolves a page by id or by path+locale, turning Wiki.js lookup
+ * failures into messages that name WHICH of the two traps above applies.
+ */
+async function lookupPage (deps: McpDeps, jwt: string, args: { id?: number, path?: string, locale: string }): Promise<PageLookup> {
+  const byId = args.id !== undefined
+  let page: PageFull | null
+  try {
+    if (byId) {
+      const data = await deps.wikiClient.graphql<{ pages: { single: PageFull | null } }>(
+        `query ($id: Int!) { pages { single(id: $id) { ${PAGE_FIELDS} } } }`, { id: args.id }, jwt)
+      page = data.pages.single
+    } else {
+      const data = await deps.wikiClient.graphql<{ pages: { singleByPath: PageFull | null } }>(
+        `query ($path: String!, $locale: String!) { pages { singleByPath(path: $path, locale: $locale) { ${PAGE_FIELDS} } } }`,
+        { path: args.path, locale: args.locale }, jwt)
+      page = data.pages.singleByPath
+    }
+  } catch (err) {
+    if (!(err instanceof WikijsGraphQLError)) throw err
+    return { error: lookupFailure(err.message, args) }
   }
-  const data = await deps.wikiClient.graphql<{ pages: { singleByPath: PageFull | null } }>(
-    `query ($path: String!, $locale: String!) { pages { singleByPath(path: $path, locale: $locale) { ${PAGE_FIELDS} } } }`,
-    { path: args.path, locale: args.locale }, jwt)
-  return data.pages.singleByPath
+  if (!page) return { error: lookupFailure('This page does not exist.', args) }
+  return { page }
+}
+
+function lookupFailure (message: string, args: { id?: number, path?: string, locale: string }): ToolResult {
+  const target = args.id !== undefined
+    ? `id ${args.id}`
+    : `path "${args.path}" (locale "${args.locale}")`
+
+  if (isMissing(message)) {
+    return fail(args.id !== undefined
+      ? `No page with ${target}. ${ID_PROVENANCE_HINT}`
+      : `No page at ${target}.`)
+  }
+  if (isForbidden(message)) {
+    const base = `Wiki.js denied ${target}: you do not have permission for this page or action. ` +
+      'This is enforced by Wiki.js groups/page rules, not by the MCP server.'
+    return fail(args.id !== undefined
+      ? `${base} Two different causes look identical here: the id may address a page you cannot touch — ` +
+        `${ID_PROVENANCE_HINT} Retry by path before concluding the permissions are wrong. ${SOURCE_PERMISSION_HINT}`
+      : `${base} ${SOURCE_PERMISSION_HINT}`)
+  }
+  return fail(`Wiki.js error while resolving ${target}: ${message}`)
 }
 
 interface MutationResponse {
@@ -112,7 +185,7 @@ function mutationFail (rr: MutationResponse['responseResult']): ToolResult {
 export function registerWikiTools (server: McpServer, deps: McpDeps): void {
   server.registerTool('search_wiki', {
     title: 'Search the wiki',
-    description: 'Full-text search across Wiki.js pages. Results are filtered by the current user\'s permissions — pages they cannot read are never returned. Returns paths usable with get_page.',
+    description: 'Full-text search across Wiki.js pages. Results are filtered by the current user\'s permissions — pages they cannot read are never returned. Each hit is addressed by path + locale; pass those to get_page. Hits carry no page id on purpose — the underlying search index does not know it.',
     inputSchema: {
       query: z.string().min(1).describe('Search terms'),
       locale: z.string().optional().describe('Locale filter, e.g. "en"')
@@ -120,14 +193,20 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
   }, async ({ query, locale }, extra) => withWikiJwt(deps, extra.authInfo, 'search_wiki', async jwt => {
     const backend = deps.searchBackend ?? new WikijsNativeSearch(deps.wikiClient)
     const s = await backend.search(query, { wikijsJwt: jwt, locale })
-    return ok({ totalHits: s.totalHits, results: s.results, suggestions: s.suggestions })
+    // `ref` is dropped deliberately: it is a search-index reference, not a
+    // page id (see SearchResultItem). Emitting it invites get_page(id: ref),
+    // which silently addresses an unrelated page.
+    const results = s.results.map(({ path, locale: hitLocale, title, description }) => ({
+      path, locale: hitLocale, title, description
+    }))
+    return ok({ totalHits: s.totalHits, results, suggestions: s.suggestions })
   }))
 
   server.registerTool('get_page', {
     title: 'Get a wiki page',
-    description: 'Fetches a single Wiki.js page (metadata + full source content) by numeric id OR by path (e.g. "engineering/onboarding"). Provide exactly one of id/path.',
+    description: 'Fetches a single Wiki.js page (metadata + full source content) by path (e.g. "engineering/onboarding") OR by numeric id. Provide exactly one of path/id. Prefer path: an id is only meaningful if it came from list_pages, create_page or an earlier get_page — a wrong id resolves to a different page, not to an error about the one you meant.',
     inputSchema: {
-      id: z.number().int().positive().optional().describe('Page id'),
+      id: z.number().int().positive().optional().describe('Page id from list_pages/create_page/get_page. Not a search_wiki result reference.'),
       path: z.string().optional().describe('Page path without leading slash, e.g. "engineering/onboarding"'),
       locale: z.string().default('en').describe('Page locale (used with path)')
     }
@@ -135,9 +214,9 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
     if ((id === undefined) === (path === undefined)) {
       return fail('Provide exactly one of "id" or "path".')
     }
-    const page = await fetchPage(deps, jwt, { id, path, locale })
-    if (!page) return fail('Page not found.')
-    return ok(renderPage(page))
+    const found = await lookupPage(deps, jwt, { id, path, locale })
+    if ('error' in found) return found.error
+    return ok(renderPage(found.page))
   }))
 
   server.registerTool('list_pages', {
@@ -202,8 +281,8 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
     title: 'Update a wiki page',
     description: 'Updates an existing Wiki.js page. Only the provided fields change; the rest is preserved. Identify the page by id, or by path+locale. Wiki.js enforces edit permissions.',
     inputSchema: {
-      id: z.number().int().positive().optional().describe('Page id (preferred)'),
-      path: z.string().optional().describe('Page path, used when id is not provided'),
+      id: z.number().int().positive().optional().describe('Page id from list_pages/create_page/get_page. Not a search_wiki result reference.'),
+      path: z.string().optional().describe('Page path — preferred, and the only safe way to address a page found via search_wiki'),
       locale: z.string().default('en'),
       content: z.string().optional().describe('New full markdown content'),
       title: z.string().optional(),
@@ -220,8 +299,9 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
     }
     // Read-merge-write: also verifies the user can read the page, and
     // works around Wiki.js requiring `tags`/`content` on every update.
-    const current = await fetchPage(deps, jwt, { id, path, locale })
-    if (!current) return fail('Page not found.')
+    const found = await lookupPage(deps, jwt, { id, path, locale })
+    if ('error' in found) return found.error
+    const current = found.page
     const data = await deps.wikiClient.graphql<{ pages: { update: MutationResponse } }>(
       `mutation ($id: Int!, $content: String!, $title: String!, $description: String!, $tags: [String]!, $isPublished: Boolean!) {
         pages { update(id: $id, content: $content, title: $title, description: $description, tags: $tags, isPublished: $isPublished) {
@@ -243,20 +323,39 @@ export function registerWikiTools (server: McpServer, deps: McpDeps): void {
 
   server.registerTool('delete_page', {
     title: 'Delete a wiki page',
-    description: 'Permanently deletes a Wiki.js page by id. Destructive and irreversible — confirm with the user before calling. Wiki.js enforces delete permissions.',
+    description: 'Permanently deletes a Wiki.js page, identified by path (preferred) or by id. Destructive and irreversible — confirm with the user before calling. Passing BOTH id and path makes the server verify they name the same page and refuse otherwise. Wiki.js enforces delete permissions.',
     inputSchema: {
-      id: z.number().int().positive().describe('Page id to delete')
+      id: z.number().int().positive().optional().describe('Page id from list_pages/create_page/get_page. Not a search_wiki result reference.'),
+      path: z.string().optional().describe('Page path — preferred, and the only safe way to address a page found via search_wiki'),
+      locale: z.string().default('en').describe('Page locale (used with path)')
     },
     annotations: {
       destructiveHint: true
     }
-  }, async ({ id }, extra) => withWikiJwt(deps, extra.authInfo, 'delete_page', async jwt => {
+  }, async ({ id, path, locale }, extra) => withWikiJwt(deps, extra.authInfo, 'delete_page', async jwt => {
+    if (id === undefined && path === undefined) {
+      return fail('Provide "path" (preferred) or "id" to identify the page to delete.')
+    }
+    // Resolve before destroying: an id that addresses a page other than the
+    // intended one deletes that other page silently. Resolving first names
+    // the victim in the result, and lets an id+path pair cross-check itself.
+    const found = await lookupPage(deps, jwt, id !== undefined ? { id, locale } : { path, locale })
+    if ('error' in found) return found.error
+    const target = found.page
+    if (id !== undefined && path !== undefined) {
+      const wanted = path.replace(/^\/+/, '')
+      if (target.path.toLowerCase() !== wanted.toLowerCase()) {
+        return fail(
+          `Refusing to delete: id ${id} is "${target.path}", not "${wanted}". ` +
+          `${ID_PROVENANCE_HINT} Re-run with only the path if that is the page you meant.`)
+      }
+    }
     const data = await deps.wikiClient.graphql<{ pages: { delete: MutationResponse } }>(
       `mutation ($id: Int!) {
         pages { delete(id: $id) { responseResult { succeeded errorCode slug message } } }
-      }`, { id }, jwt)
+      }`, { id: target.id }, jwt)
     const res = data.pages.delete
     if (!res.responseResult.succeeded) return mutationFail(res.responseResult)
-    return ok({ deleted: true, id })
+    return ok({ deleted: true, id: target.id, path: target.path, locale: target.locale })
   }))
 }
