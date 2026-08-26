@@ -1,14 +1,19 @@
 name: Release on main
 
-# Builds and publishes the image for whatever version dev brought in.
+# Publishes the artifact for whatever version dev brought in.
 #
-# The version, the CHANGELOG, the vX.Y.Z tag and the GitHub Release are all
-# produced earlier, on dev, by "Release please" — this workflow only turns
-# the released source into a published artifact.
+# The version, the CHANGELOG, the vX.Y.Z tag and the GitHub Release are
+# normally produced earlier, on dev, by "Release please". This workflow turns
+# the released source into a published image, and carries a safety net: if
+# that version has no tag yet, it creates the tag and Release itself.
 #
-# Each version is published exactly once: the run skips itself when that
-# image tag is already in GHCR. Without that check a later push to main
-# (a direct docs fix, a hotfix merge) would overwrite an already-published
+# The safety net matters for a version release-please did not tag — the first
+# release after adopting it, or a hand-set version. In the steady-state flow
+# the tag already exists by the time dev reaches main and the step is skipped.
+#
+# Each version is published exactly once: the run skips the build when that
+# image tag is already in GHCR. Without that check a later push to main (a
+# direct docs fix, a hotfix merge) would overwrite an already-published
 # vX.Y.Z with different content.
 #
 # No PAT or external secret is needed — GITHUB_TOKEN is provided
@@ -24,14 +29,17 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  packages: write   # push the image to GHCR (built-in token)
+  contents: write   # create the tag + GitHub Release when missing
+  packages: write   # push the image to GHCR
 
 jobs:
   publish-image:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Resolve version and image name
         id: meta
@@ -43,6 +51,12 @@ jobs:
           # (e.g. "MaxPopov"). Lowercase it so the image tag is valid.
           owner_lc="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${owner_lc}/wikijs-mcp-server" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+            echo "v$v has no tag — this run will create it."
+          fi
           echo "Publishing v$v."
 
       - name: Log in to GHCR
@@ -58,7 +72,7 @@ jobs:
           ref="${{ steps.meta.outputs.image }}:v${{ steps.meta.outputs.version }}"
           if docker manifest inspect "$ref" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "$ref is already published — nothing to do."
+            echo "$ref is already published — nothing to build."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -73,3 +87,14 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}:v${{ steps.meta.outputs.version }}
             ${{ steps.meta.outputs.image }}:latest
+
+      # Runs AFTER the image so a Release never announces an artifact that
+      # does not exist yet. Skipped when release-please already tagged it.
+      - name: Create tag and GitHub Release if missing
+        if: steps.meta.outputs.tagged == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.meta.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: v${{ steps.meta.outputs.version }}
+          generate_release_notes: true

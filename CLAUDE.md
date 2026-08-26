@@ -52,7 +52,8 @@ workflows split the job:
 - `.github/workflows/release-on-main.yml` (`Release on main`) — runs on every
   push to `main`. Builds the image and pushes it to GHCR under the version in
   `package.json`, skipping itself if that image tag is already published. It
-  does nothing else: no tag, no Release, no version logic.
+  holds no version logic; it only carries a safety net — if that version has
+  no tag yet, it creates the tag + Release after publishing the image.
 
 Neither needs a PAT or any secret — both use the built-in `GITHUB_TOKEN`.
 
@@ -83,6 +84,12 @@ to `extra-files` in the same PR**, or it will silently go stale.
   created when the release PR merges into `dev`; the image is only built when
   `dev` reaches `main`. Between the two, `docker pull` for that version 404s.
   Do the `dev` → `main` merge promptly after a release PR.
+- **A hand-set version still releases.** If `package.json` carries a version
+  release-please never tagged — someone edited it, or it predates adopting
+  release-please — `Release on main` creates the tag and Release itself, after
+  the image. Without that, such a version would ship an image and nothing else.
+  This is a safety net, not a second way to release: it writes no CHANGELOG
+  entry, so the normal path stays the release PR on `dev`.
 - **The tag does not trigger the image build.** A tag created with
   `GITHUB_TOKEN` does not trigger other workflows (GitHub blocks recursive
   triggers), which is exactly why the build hangs off the push to `main`.
