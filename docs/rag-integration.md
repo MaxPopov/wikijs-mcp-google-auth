@@ -42,12 +42,18 @@ Content-Type: application/json
 {
   "totalHits": 3,
   "results": [
-    { "id": "123", "title": "...", "description": "chunk excerpt ...",
+    { "ref": "chunk-123", "title": "...", "description": "chunk excerpt ...",
       "path": "engineering/onboarding", "locale": "en", "score": 0.87 }
   ],
   "suggestions": []
 }
 ```
+
+`ref` — непрозорий ідентифікатор бекенда (chunk id тощо). Це **не** `pages.id`:
+MCP не віддає його моделі й ніколи не підставляє в `get_page(id:)`. Сторінка
+адресується парою `path` + `locale` — саме так само, як для нативного пошуку
+Wiki.js, де `id` хіта береться з пошукового індексу, а не з таблиці `pages`
+(див. `SearchResultItem` у `src/search/backend.ts`).
 
 Вимоги до RAG-сервісу:
 
