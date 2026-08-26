@@ -9,7 +9,7 @@ import { WikijsClient } from './wikijs/client.js'
 import { WikijsTokenBroker } from './wikijs/broker.js'
 import { createApp } from './server.js'
 
-export const VERSION = '0.1.0'
+export const VERSION = '0.2.0'
 
 export function main (): void {
   const settings = loadServerSettings()

@@ -1,6 +1,6 @@
 {
   "name": "@wikijs-mcp/e2e-ui",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Browser UI end-to-end tests (Playwright) and a standalone fake Google IdP emulator. Test-only — never part of any published artifact.",
   "license": "Apache-2.0",
