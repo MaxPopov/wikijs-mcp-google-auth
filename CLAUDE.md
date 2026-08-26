@@ -19,59 +19,111 @@ same PR.
   history — restart the working branch from the latest base
   (`git checkout -B <branch> origin/dev`).
 
+## Commit messages: Conventional Commits are load-bearing
+
+Release versions are computed FROM COMMIT MESSAGES. A commit that does not
+follow the convention is invisible to the release tooling, so a release that
+consists only of such commits never gets proposed.
+
+Prefix every commit subject:
+
+| Prefix | Effect on the next version |
+|---|---|
+| `fix:` | patch (0.2.0 -> 0.2.1) |
+| `feat:` | minor (0.2.0 -> 0.3.0) |
+| `feat!:` / `fix!:`, or a `BREAKING CHANGE:` footer | major (0.2.0 -> 1.0.0) |
+| `chore:`, `docs:`, `test:`, `refactor:`, `ci:`, `build:` | none — shipped, but does not by itself trigger a release |
+
+The prefix must be on the COMMIT, not only on the PR title: this repo merges
+feature branches with merge commits, so the individual commits are what the
+tooling reads. (If a PR is squash-merged instead, the PR title becomes the
+commit subject and it is the title that must carry the prefix.)
+
 ## How releases work (READ THIS BEFORE MERGING TO `main`)
 
-Releases are **fully automatic** via `.github/workflows/release-on-main.yml`
-(`Release on main`). There is **no manual tagging** and **no PAT/secret** — it
-uses only the built-in `GITHUB_TOKEN`.
+Releases are automatic and **the version is never edited by hand**. Two
+workflows split the job:
+
+- `.github/workflows/release-please.yml` (`Release please`) — runs on every
+  push to `dev`. Reads the Conventional Commits since the last release and
+  keeps a release PR open against `dev`, titled `chore(dev): release X.Y.Z`.
+  Merging it bumps the version everywhere, writes `CHANGELOG.md`, and creates
+  the `vX.Y.Z` tag + GitHub Release.
+- `.github/workflows/release-on-main.yml` (`Release on main`) — runs on every
+  push to `main`. Builds the image and pushes it to GHCR under the version in
+  `package.json`, skipping itself if that image tag is already published. It
+  does nothing else: no tag, no Release, no version logic.
+
+Neither needs a PAT or any secret — both use the built-in `GITHUB_TOKEN`.
 
 ### To cut a release
-1. On `dev`, **bump `version` in `package.json`** (semver) — this is what
-   drives the release. Do it in the PR that closes out the release scope.
-2. Open a PR **`dev` → `main`** and merge it (merge commit, so history stays
-   aligned).
-3. The push to `main` triggers `Release on main`, which:
-   - reads `version` from `package.json`;
-   - if the tag `vX.Y.Z` does **not** exist yet → builds and pushes the image
-     to GHCR, then creates the git tag `vX.Y.Z` **and** a GitHub Release
-     (auto-generated notes) in the **same** run;
-   - if `vX.Y.Z` already exists (version unchanged) → the run is a **no-op**.
-
-> Why one job does everything: a tag/release created with `GITHUB_TOKEN` does
-> not trigger other workflows (GitHub blocks recursive triggers), so a separate
-> "build on tag" workflow would never fire.
+1. Land the work on `dev` via PRs, with Conventional Commit messages.
+2. Merge the open **`chore(dev): release X.Y.Z`** PR into `dev`. This is the
+   release decision — everything about the number is already computed.
+3. Open a PR **`dev` → `main`** and merge it (merge commit, so history stays
+   aligned). The image is built and published.
 
 ### Published artifacts
 - Image: `ghcr.io/<owner-lowercased>/wikijs-mcp-server:vX.Y.Z` (+ `:latest`).
-- Git tag `vX.Y.Z` and a matching GitHub Release.
+- Git tag `vX.Y.Z`, a matching GitHub Release, and a `CHANGELOG.md` entry.
+
+### What the version applies to
+`release-please-config.json` lists every file carrying the version. Besides
+the root `package.json` it updates the three workspace `package.json` files
+and — via `x-release-please-version` annotations — the version the MCP server
+advertises over the protocol (`packages/mcp-server/src/index.ts` and
+`src/mcp.ts`). **If you add another place that hardcodes the version, add it
+to `extra-files` in the same PR**, or it will silently go stale.
 
 ### Non-obvious rules / gotchas (learned the hard way)
+- **No release PR appeared?** Almost always the commits since the last release
+  are all `chore:`/`docs:`-class, or carry no prefix at all. That is the
+  tooling working as designed, not a failure.
+- **The GitHub Release exists before the image does.** The tag and Release are
+  created when the release PR merges into `dev`; the image is only built when
+  `dev` reaches `main`. Between the two, `docker pull` for that version 404s.
+  Do the `dev` → `main` merge promptly after a release PR.
+- **The tag does not trigger the image build.** A tag created with
+  `GITHUB_TOKEN` does not trigger other workflows (GitHub blocks recursive
+  triggers), which is exactly why the build hangs off the push to `main`.
 - **GHCR paths must be lowercase.** `github.repository_owner` keeps the
   account's original casing (e.g. `MaxPopov`), but Docker/GHCR reject an
-  uppercase repository path (`repository name must be lowercase`). The workflow
-  lowercases the owner in the `meta` step — do **not** reintroduce a raw
-  `ghcr.io/${{ github.repository_owner }}/...` tag.
-- The workflow needs `permissions: contents: write` (tag + Release) and
-  `packages: write` (push image). These are set in the workflow file.
-- If the **"Create tag and GitHub Release"** step fails with **403/permission**:
+  uppercase repository path (`repository name must be lowercase`). The
+  workflow lowercases the owner in the `meta` step — do **not** reintroduce a
+  raw `ghcr.io/${{ github.repository_owner }}/...` tag.
+- **`package-lock.json` lags for the workspace packages.** release-please
+  updates the root entry but not the `packages/*` version entries. `npm ci`
+  tolerates that (verified), and the next `npm install` resyncs it.
+- The workflows need `contents: write` + `pull-requests: write` + `issues:
+  write` (release PR, tag, Release, its `autorelease:*` labels) and
+  `packages: write` (push the image). These are set in the workflow files.
+- If a step fails with **403/permission**:
   - Settings → Actions → General → **Workflow permissions = Read and write**, and/or
   - if a **tag ruleset** protects `v*`, add **GitHub Actions** to its bypass list.
-  (These were **not** needed as of v0.1.0 — current token perms sufficed — but
-  this is the first thing to check if tag/release creation starts 403-ing.)
 - The GHCR package is **private** by default. To allow anonymous `docker pull`,
   make the package **Public** once in its GHCR package settings. Otherwise
   consumers `docker login ghcr.io` first.
 
+### If a release run never starts
+Both release workflows also accept a manual **Run workflow** from the Actions
+tab (`workflow_dispatch`). That matters because a push-triggered run that is
+never created — Actions disabled, quota exhausted, an outage — is not retried
+when the service comes back, and the triggering push cannot be replayed. Merge
+a `dev` → `main` PR while Actions is down and the release simply does not
+happen; dispatch `Release on main` by hand once it is back.
+
 ### If a release run fails
 Diagnose from the run logs before touching repo settings — the failure is
 usually in the workflow/build, not permissions (e.g. the v0.1.0 casing bug
-failed at *Build and push image*, not at tag creation). Since a failed run
-produces no tag/release, fixing the cause and re-landing on `main` re-runs the
-release cleanly for the same version.
+failed at *Build and push image*, not at tag creation). A failed
+`Release on main` produces no image; re-running it after the fix republishes
+the same version cleanly, since the build is idempotent.
 
 ### After a release: keep branches in sync
 Merging a hotfix into `main` leaves `dev` behind. Sync it back with a PR
-`main` → `dev` so the branches don't drift.
+`main` → `dev` so the branches don't drift. Normal releases do not need this:
+the version bump is made on `dev` and flows to `main`, not the other way.
+
 
 ## Local checks before pushing
 - `npm ci && npm run build` — typecheck/build.
